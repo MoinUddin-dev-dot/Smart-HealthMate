@@ -147,9 +147,8 @@ struct SMAMedicineTrackerStats: View {
 // MARK: - MedicineListView (First Tab Content)
 struct MedicineListView: View {
     @Binding var medicines: [Medicine]
-    let allMedicinesCount: Int // To pass to SMAMedicineTrackerStats
+    let allMedicinesCount: Int
     @State private var showingAddMedicineSheet = false
-    // Removed @Environment(\.safeAreaInsets) as it will now be read via GeometryReader
 
     private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -158,17 +157,14 @@ struct MedicineListView: View {
     }()
 
     var body: some View {
-        NavigationStack { // Provides its own navigation bar and full screen behavior
-              { geometry in // Use GeometryReader to get safe area insets
+        NavigationStack {
+            GeometryReader { geometry in
                 ScrollView(showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 20) {
-                        // Subheading for the Medicine Tracker screen (now inside scroll view)
                         SMAMedicineTrackerHeader()
 
-                        // Medicine Tracker Stats (now inside scroll view)
                         SMAMedicineTrackerStats(medicinesCount: allMedicinesCount)
-                        
-                        // Medicine List specific content
+
                         LazyVStack(spacing: 15) {
                             ForEach($medicines) { $medicine in
                                 MedicineDetailCardView(medicine: medicine) { medicineId, doseId, newIsTakenStatus in
@@ -184,12 +180,10 @@ struct MedicineListView: View {
                         .padding(.horizontal)
                         .padding(.bottom, 20)
                     }
-                    // Add padding to the bottom of the ScrollView to prevent collision with the fixed bottom bar
-                    .padding(.bottom, geometry.safeAreaInsets.bottom + 60) // Use geometry.safeAreaInsets
+                    .padding(.bottom, geometry.safeAreaInsets.bottom + 60)
                 }
             }
-            .navigationTitle("Medicine Tracker") // This screen's title
-            
+            .navigationTitle("Medicine Tracker")
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button(action: {
@@ -207,6 +201,7 @@ struct MedicineListView: View {
         }
     }
 }
+
 
 
 #Preview {
