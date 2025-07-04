@@ -5,10 +5,10 @@ struct SMAAlert: Identifiable {
     let id = UUID()
     let type: SMAAlertType
     let recipient: String
-    let subject: String
+    var subject: String // Changed to var so it can be potentially updated
     var status: SMAAlertStatus
     let sentAt: Date
-    let content: String
+    var content: String // Changed to var so it can be potentially updated
 
     enum SMAAlertType: String, CaseIterable, Codable {
         case emergency = "Emergency"
@@ -26,7 +26,9 @@ struct SMAAlert: Identifiable {
 struct SMAAlertSettings {
     var emergencyContacts: [String]
     var bpThreshold: SMABPThreshold
-    var sugarThreshold: Int
+    // Updated to two sugar thresholds
+    var fastingSugarThreshold: Int
+    var afterMealSugarThreshold: Int
     var enableEmergencyAlerts: Bool
     var enableReminderAlerts: Bool
     var enableReportAlerts: Bool
@@ -40,7 +42,7 @@ struct SMAAlertSettings {
 
 // MARK: - DateFormatter Extension (for SMAMedicine and SMAAlerts)
 extension DateFormatter {
-    static let yyyyMMdd: DateFormatter = {
+    static let yearMonthDay: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
         formatter.calendar = Calendar(identifier: .iso8601)
@@ -269,7 +271,8 @@ struct SMAEmailAlertsView: View {
     @State private var settings: SMAAlertSettings = SMAAlertSettings(
         emergencyContacts: ["family@example.com", "doctor@example.com"],
         bpThreshold: SMAAlertSettings.SMABPThreshold(systolic: 180, diastolic: 110),
-        sugarThreshold: 250,
+        fastingSugarThreshold: 130, // Default for new field
+        afterMealSugarThreshold: 170, // Default for new field
         enableEmergencyAlerts: true,
         enableReminderAlerts: true,
         enableReportAlerts: false
@@ -277,18 +280,10 @@ struct SMAEmailAlertsView: View {
 
     @State private var isSettingsOpen: Bool = false
     @State private var newContact: String = ""
-    @State private var bpSystolicInput: String = "" // For TextField binding
-    @State private var bpDiastolicInput: String = "" // For TextField binding
-    @State private var sugarThresholdInput: String = "" // For TextField binding
 
     // MARK: - Lifecycle
     init(medicines: Int) {
         self.medicines = medicines
-        
-        // Initialize State variables using the settings' initial values
-        _bpSystolicInput = State(initialValue: String(settings.bpThreshold.systolic))
-        _bpDiastolicInput = State(initialValue: String(settings.bpThreshold.diastolic))
-        _sugarThresholdInput = State(initialValue: String(settings.sugarThreshold))
     }
 
     // MARK: - Actions
@@ -371,6 +366,13 @@ Smart HealthMate Emergency System
         settings.emergencyContacts.removeAll { $0 == email }
         print("Emergency contact removed")
     }
+    
+    private func updateEmergencyContact(oldContact: String, newContact: String) {
+        if let index = settings.emergencyContacts.firstIndex(of: oldContact) {
+            settings.emergencyContacts[index] = newContact
+            print("Emergency contact updated")
+        }
+    }
 
     // MARK: - Helper for Icons and Colors
     private func getStatusIcon(_ status: SMAAlert.SMAAlertStatus) -> Image {
@@ -430,8 +432,10 @@ Smart HealthMate Emergency System
                     }
 
                     // Medicine Tracker Stats (NEWLY ADDED SECTION)
-                    SMAMedicineTrackerStats(medicinesCount: medicines)
-                        .padding(.horizontal) // Apply horizontal padding for these cards
+                    // Assuming SMAMedicineTrackerStats exists and takes medicinesCount
+                    // If not, this line will cause a compile error.
+                     SMAMedicineTrackerStats(medicinesCount: medicines)
+                    //    .padding(.horizontal) // Apply horizontal padding for these cards
 
                     // Alert Stats (Now arranged vertically)
                     VStack(spacing: 16) {
@@ -482,7 +486,7 @@ Smart HealthMate Emergency System
                 .padding(.vertical) // Overall vertical padding for the scroll view content
             }
             .navigationTitle("Email Alert System")
-             // .inline to make space for custom title view
+            // .inline to make space for custom title view
             .toolbar {
 //                ToolbarItem(placement: .principal) { // principal placement for custom title view
 //                    VStack(alignment: .center, spacing: 4) { // Centered for cleaner look
@@ -540,11 +544,9 @@ Smart HealthMate Emergency System
                     settings: $settings,
                     isSettingsOpen: $isSettingsOpen,
                     newContact: $newContact,
-                    bpSystolicInput: $bpSystolicInput,
-                    bpDiastolicInput: $bpDiastolicInput,
-                    sugarThresholdInput: $sugarThresholdInput,
                     addEmergencyContact: addEmergencyContact,
-                    removeEmergencyContact: removeEmergencyContact
+                    removeEmergencyContact: removeEmergencyContact,
+                    updateEmergencyContact: updateEmergencyContact
                 )
             }
         }
@@ -669,117 +671,227 @@ struct SMAEmailAlertsSettingsView: View {
     @Binding var settings: SMAAlertSettings
     @Binding var isSettingsOpen: Bool
     @Binding var newContact: String
-    @Binding var bpSystolicInput: String
-    @Binding var bpDiastolicInput: String
-    @Binding var sugarThresholdInput: String
     let addEmergencyContact: () -> Void
     let removeEmergencyContact: (String) -> Void
+    let updateEmergencyContact: (String, String) -> Void // New closure for updating
+
+    @State private var showingEditContactAlert = false
+    @State private var contactToEdit: String = ""
+    @State private var editedContactValue: String = ""
+
+    // State variables for TextField input (String)
+    @State private var systolicInput: String = ""
+    @State private var diastolicInput: String = ""
+    @State private var fastingSugarInput: String = ""
+    @State private var afterMealSugarInput: String = ""
+
+    // Focus states for each TextField
+    private enum Field: Hashable {
+        case systolic
+        case diastolic
+        case fastingSugar
+        case afterMealSugar
+    }
+    @FocusState private var focusedField: Field?
+
+
+    // Constants for min/max thresholds
+    let minSystolic: Int = 70
+    let maxSystolic: Int = 200
+    let minDiastolic: Int = 40
+    let maxDiastolic: Int = 150
+    
+    // Updated sugar ranges
+    let minFastingSugar: Int = 70
+    let maxFastingSugar: Int = 140
+    let minAfterMealSugar: Int = 0 // Practical lower bound
+    let maxAfterMealSugar: Int = 179 // Less than 180
+
+    // Initialize the local string states with the current settings values
+    init(settings: Binding<SMAAlertSettings>, isSettingsOpen: Binding<Bool>, newContact: Binding<String>, addEmergencyContact: @escaping () -> Void, removeEmergencyContact: @escaping (String) -> Void, updateEmergencyContact: @escaping (String, String) -> Void) {
+        _settings = settings
+        _isSettingsOpen = isSettingsOpen
+        _newContact = newContact
+        self.addEmergencyContact = addEmergencyContact
+        self.removeEmergencyContact = removeEmergencyContact
+        self.updateEmergencyContact = updateEmergencyContact
+
+        // Initialize local string states from the binding's wrapped value
+        _systolicInput = State(initialValue: String(settings.wrappedValue.bpThreshold.systolic))
+        _diastolicInput = State(initialValue: String(settings.wrappedValue.bpThreshold.diastolic))
+        _fastingSugarInput = State(initialValue: String(settings.wrappedValue.fastingSugarThreshold))
+        _afterMealSugarInput = State(initialValue: String(settings.wrappedValue.afterMealSugarThreshold))
+
+    }
 
     var body: some View {
         NavigationView {
-            VStack(alignment: .leading, spacing: 16) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Email Alert Settings")
-                        .font(.title2)
-                        .fontWeight(.bold)
-                    Text("Configure emergency contacts and alert thresholds")
-                        .font(.subheadline)
-                        .foregroundColor(.gray)
-                }
-                .padding(.bottom, 8)
-
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Emergency Contacts")
-                        .font(.headline)
-                    
-                    VStack(spacing: 8) {
+            Form { // Using Form for better organization of settings
+                // Removed Section: "Alert Type Settings"
+                
+                Section(header: Text("Emergency Contacts")) {
+                    List {
                         ForEach(settings.emergencyContacts, id: \.self) { contact in
                             HStack {
                                 Text(contact)
-                                    .font(.subheadline)
                                 Spacer()
-                                Button(action: { removeEmergencyContact(contact) }) {
-                                    Text("Remove")
-                                        .font(.subheadline)
+                                Button {
+                                    contactToEdit = contact
+                                    editedContactValue = contact // Pre-fill with current value
+                                    showingEditContactAlert = true
+                                } label: {
+                                    Image(systemName: "pencil.circle.fill")
+                                        .font(.title2)
+                                        .foregroundColor(.blue)
+                                }
+                                .buttonStyle(.plain)
+
+                                Button {
+                                    removeEmergencyContact(contact)
+                                } label: {
+                                    Image(systemName: "minus.circle.fill")
+                                        .font(.title2)
                                         .foregroundColor(.red)
                                 }
                                 .buttonStyle(.plain)
                             }
-                            .padding(8)
-                            .background(Color.gray.opacity(0.05))
-                            .cornerRadius(6)
-                        }
-                        
-                        HStack(spacing: 8) {
-                            TextField("Add emergency contact email", text: $newContact)
-                                .textFieldStyle(.roundedBorder)
-                                .autocapitalization(.none)
-                                .keyboardType(.emailAddress)
-                            Button(action: addEmergencyContact) {
-                                Text("Add")
+                            // Swipe actions also remain as an alternative removal method
+                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                Button(role: .destructive) {
+                                    removeEmergencyContact(contact)
+                                } label: {
+                                    Label("Delete", systemImage: "trash.fill")
+                                }
                             }
-                            .buttonStyle(.borderedProminent)
+                        }
+                    }
+                    
+                    HStack {
+                        TextField("Add new contact email", text: $newContact)
+                            .autocapitalization(.none)
+                            .keyboardType(.emailAddress)
+                        Button("Add") {
+                            addEmergencyContact()
                         }
                     }
                 }
                 
-                VStack(alignment: .leading, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("BP Alert Threshold")
-                            .font(.headline)
-                        HStack(spacing: 8) {
-                            TextField("Systolic", text: $bpSystolicInput)
-                                .textFieldStyle(.roundedBorder)
-                                .keyboardType(.numberPad)
-                                .onChange(of: bpSystolicInput) { newValue in
-                                    if let intValue = Int(newValue) {
-                                        settings.bpThreshold.systolic = intValue
+                Section(header: Text("Blood Pressure Thresholds")) {
+                    VStack(alignment: .leading) {
+                        Text("Systolic (\(minSystolic)-\(maxSystolic) mmHg)")
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                        TextField("Systolic", text: $systolicInput)
+                            .keyboardType(.numberPad)
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                            .focused($focusedField, equals: .systolic) // Assign focus state
+                            .onChange(of: focusedField) { oldValue, newValue in // Use oldValue, newValue for iOS 17+
+                                if oldValue == .systolic && newValue == nil { // Lost focus from this field
+                                    // Perform validation and rounding
+                                    if let doubleValue = Double(systolicInput) {
+                                        let roundedInt = Int(round(doubleValue))
+                                        settings.bpThreshold.systolic = max(minSystolic, min(maxSystolic, roundedInt))
+                                    } else {
+                                        // If input is empty or invalid, reset to the current setting's value
+                                        settings.bpThreshold.systolic = settings.bpThreshold.systolic
                                     }
+                                    self.systolicInput = String(settings.bpThreshold.systolic) // Update UI
                                 }
-                            TextField("Diastolic", text: $bpDiastolicInput)
-                                .textFieldStyle(.roundedBorder)
-                                .keyboardType(.numberPad)
-                                .onChange(of: bpDiastolicInput) { newValue in
-                                    if let intValue = Int(newValue) {
-                                        settings.bpThreshold.diastolic = intValue
-                                    }
-                                }
-                        }
+                            }
                     }
                     
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Sugar Alert Threshold")
-                            .font(.headline)
-                        TextField("mg/dL", text: $sugarThresholdInput)
-                            .textFieldStyle(.roundedBorder)
+                    VStack(alignment: .leading) {
+                        Text("Diastolic (\(minDiastolic)-\(maxDiastolic) mmHg)")
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                        TextField("Diastolic", text: $diastolicInput)
                             .keyboardType(.numberPad)
-                            .onChange(of: sugarThresholdInput) { newValue in
-                                if let intValue = Int(newValue) {
-                                    settings.sugarThreshold = intValue
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                            .focused($focusedField, equals: .diastolic) // Assign focus state
+                            .onChange(of: focusedField) { oldValue, newValue in
+                                if oldValue == .diastolic && newValue == nil { // Lost focus from this field
+                                    if let doubleValue = Double(diastolicInput) {
+                                        let roundedInt = Int(round(doubleValue))
+                                        settings.bpThreshold.diastolic = max(minDiastolic, min(maxDiastolic, roundedInt))
+                                    } else {
+                                        settings.bpThreshold.diastolic = settings.bpThreshold.diastolic
+                                    }
+                                    self.diastolicInput = String(settings.bpThreshold.diastolic)
                                 }
                             }
                     }
                 }
-
-                Spacer()
-
-                HStack {
-                    Spacer()
-                    Button(action: { isSettingsOpen = false }) {
-                        Text("Save Settings")
+                
+                Section(header: Text("Blood Sugar Thresholds")) {
+                    VStack(alignment: .leading) {
+                        Text("Fasting Sugar (\(minFastingSugar)-\(maxFastingSugar) mg/dL)")
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                        TextField("Fasting Sugar", text: $fastingSugarInput)
+                            .keyboardType(.numberPad)
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                            .focused($focusedField, equals: .fastingSugar) // Assign focus state
+                            .onChange(of: focusedField) { oldValue, newValue in
+                                if oldValue == .fastingSugar && newValue == nil { // Lost focus from this field
+                                    if let doubleValue = Double(fastingSugarInput) {
+                                        let roundedInt = Int(round(doubleValue))
+                                        settings.fastingSugarThreshold = max(minFastingSugar, min(maxFastingSugar, roundedInt))
+                                    } else {
+                                        settings.fastingSugarThreshold = settings.fastingSugarThreshold
+                                    }
+                                    self.fastingSugarInput = String(settings.fastingSugarThreshold)
+                                }
+                            }
                     }
-                    .buttonStyle(.borderedProminent)
+                    
+                    VStack(alignment: .leading) {
+                        Text("After Meal Sugar (<\(maxAfterMealSugar + 1) mg/dL)") // Display as <180
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                        TextField("After Meal Sugar", text: $afterMealSugarInput)
+                            .keyboardType(.numberPad)
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                            .focused($focusedField, equals: .afterMealSugar) // Assign focus state
+                            .onChange(of: focusedField) { oldValue, newValue in
+                                if oldValue == .afterMealSugar && newValue == nil { // Lost focus from this field
+                                    if let doubleValue = Double(afterMealSugarInput) {
+                                        let roundedInt = Int(round(doubleValue))
+                                        settings.afterMealSugarThreshold = max(minAfterMealSugar, min(maxAfterMealSugar, roundedInt))
+                                    } else {
+                                        settings.afterMealSugarThreshold = settings.afterMealSugarThreshold
+                                    }
+                                    self.afterMealSugarInput = String(settings.afterMealSugarThreshold)
+                                }
+                            }
+                    }
                 }
             }
-            .padding()
-            .navigationTitle("Settings")
+            .navigationTitle("Alert Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Done") {
+                        // Dismiss keyboard if still active when 'Done' is tapped
+                        focusedField = nil
                         isSettingsOpen = false
                     }
                 }
+            }
+            .alert("Edit Contact", isPresented: $showingEditContactAlert) {
+                TextField("Email", text: $editedContactValue)
+                    .autocapitalization(.none)
+                    .keyboardType(.emailAddress)
+                Button("Update") {
+                    if !editedContactValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && editedContactValue.contains("@") {
+                        updateEmergencyContact(contactToEdit, editedContactValue)
+                    } else {
+                        // Optionally, show an error for invalid email
+                        print("Invalid email for update")
+                    }
+                }
+                Button("Cancel", role: .cancel) { }
+            } message: {
+                Text("Enter the new email address for \(contactToEdit).")
             }
         }
     }

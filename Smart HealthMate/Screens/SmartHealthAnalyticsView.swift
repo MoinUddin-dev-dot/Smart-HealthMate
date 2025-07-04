@@ -321,72 +321,7 @@ struct SpikeRow: View {
     }
 }
 
-struct RecommendationRow: View {
-    let recommendation: Recommendation
-    let acceptAction: (UUID) -> Void
-    let dismissAction: (UUID) -> Void
 
-    var body: some View {
-        CustomCard(backgroundColor: .white) {
-            VStack(alignment: .leading) {
-                CustomCardHeader(paddingBottom: 12) {
-                    HStack(alignment: .top) {
-                        HStack(spacing: 12) {
-                            Circle()
-                                .fill(getPriorityColor(priority: recommendation.priority))
-                                .frame(width: 40, height: 40)
-                                .overlay(
-                                    getTypeIcon(type: recommendation.type)
-                                        .font(.body)
-                                        .foregroundColor(
-                                            recommendation.priority == "high" ? .red :
-                                            recommendation.priority == "medium" ? .orange : .blue
-                                        )
-                                )
-                            VStack(alignment: .leading) {
-                                CustomCardTitle(text: recommendation.title, fontSize: 18)
-                                CustomCardDescription(text: recommendation.description)
-                            }
-                        }
-                        Spacer()
-                        CustomBadge(text: recommendation.priority.uppercased(), variant: recommendation.priority == "high" ? "destructive" : "secondary")
-                    }
-                }
-                
-                CustomCardContent {
-                    HStack {
-                        if let action = recommendation.action {
-                            Button(action: {
-                                acceptAction(recommendation.id)
-                            }) {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .font(.footnote)
-                                    Text(action)
-                                }
-                                .font(.subheadline)
-                                .padding(.vertical, 8)
-                                .padding(.horizontal, 12)
-                                .background(Color.green.opacity(0.8))
-                                .foregroundColor(.white)
-                                .cornerRadius(8)
-                            }
-                        }
-                        Spacer()
-                        Button(action: {
-                            dismissAction(recommendation.id)
-                        }) {
-                            Text("Dismiss")
-                                .font(.subheadline)
-                                .foregroundColor(.gray.opacity(0.7))
-                        }
-                    }
-                    .padding(.top, 8)
-                }
-            }
-        }
-    }
-}
 
 struct InsightRow: View {
     let insight: Insight
@@ -530,7 +465,7 @@ struct SmartHealthAnalyticsView: View {
                 borderColor: Color.purple.opacity(0.2),
                 gradient: LinearGradient(colors: [Color.purple.opacity(0.05), Color.purple.opacity(0.15)], startPoint: .topLeading, endPoint: .bottomTrailing)
             ) {
-                CustomCardContent(paddingValue: 16) {
+                CustomCardContent(paddingValue: 10) {
                     HStack {
                         VStack(alignment: .leading) {
                             Text("\(activeRecommendations.count)")
@@ -559,7 +494,7 @@ struct SmartHealthAnalyticsView: View {
                 borderColor: Color.orange.opacity(0.2),
                 gradient: LinearGradient(colors: [Color.orange.opacity(0.05), Color.orange.opacity(0.15)], startPoint: .topLeading, endPoint: .bottomTrailing)
             ) {
-                CustomCardContent(paddingValue: 16) {
+                CustomCardContent(paddingValue: 10) {
                     HStack {
                         VStack(alignment: .leading) {
                             Text("\(patternAnalysis?.medicinePatterns.count ?? 0)")
@@ -588,7 +523,7 @@ struct SmartHealthAnalyticsView: View {
                 borderColor: Color.red.opacity(0.2),
                 gradient: LinearGradient(colors: [Color.red.opacity(0.05), Color.red.opacity(0.15)], startPoint: .topLeading, endPoint: .bottomTrailing)
             ) {
-                CustomCardContent(paddingValue: 16) {
+                CustomCardContent(paddingValue: 10) {
                     HStack {
                         VStack(alignment: .leading) {
                             Text("\(patternAnalysis?.spikes.count ?? 0)")
@@ -737,20 +672,7 @@ struct SmartHealthAnalyticsView: View {
         }
     }
 
-    private var recommendationsListView: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Smart Recommendations")
-                .font(.headline)
-                .fontWeight(.semibold)
-            ForEach(activeRecommendations) { recommendation in
-                RecommendationRow(
-                    recommendation: recommendation,
-                    acceptAction: acceptRecommendation,
-                    dismissAction: dismissRecommendation
-                )
-            }
-        }
-    }
+
 
     private var insightsListView: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -780,9 +702,6 @@ struct SmartHealthAnalyticsView: View {
                         patternAnalysisResultsView
                     }
 
-                    if activeRecommendations.count > 0 {
-                        recommendationsListView
-                    }
 
                     if insights.count > 0 {
                         insightsListView
@@ -815,6 +734,7 @@ struct SmartHealthAnalyticsView: View {
                     }
                 }
                 .padding()
+                .padding(.bottom, 80)
             }
             .background(Color.white)
             .navigationTitle("Smart Health Analytics") // Navigation Title
