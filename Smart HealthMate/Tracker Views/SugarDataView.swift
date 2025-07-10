@@ -32,6 +32,8 @@ struct SugarDataView: View {
         }
 }
 
+
+
 #Preview {
     SugarDataView(value: 131)
         .padding()

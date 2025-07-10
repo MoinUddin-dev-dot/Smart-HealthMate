@@ -3,4 +3,22 @@
    uuid = "5ABEDA6D-4B5C-46A3-BE40-60C7C903ECAA"
    type = "1"
    version = "2.0">
+   <Breakpoints>
+      <BreakpointProxy
+         BreakpointExtensionID = "Xcode.Breakpoint.FileBreakpoint">
+         <BreakpointContent
+            uuid = "C0BECA9C-74A8-4DA2-B49F-33B4196C9E64"
+            shouldBeEnabled = "No"
+            ignoreCount = "0"
+            continueAfterRunningActions = "No"
+            filePath = "../../../../var/folders/lx/0rh3yc096h3566q1cl0_zxlr0000gp/T/swift-generated-sources/@__swiftmacro_16Smart_HealthMate8MedicineC14scheduledDoses18_PersistedPropertyfMa_.swift"
+            startingColumnNumber = "9223372036854775807"
+            endingColumnNumber = "9223372036854775807"
+            startingLineNumber = "1"
+            endingLineNumber = "1"
+            landmarkName = "scheduledDoses"
+            landmarkType = "37">
+         </BreakpointContent>
+      </BreakpointProxy>
+   </Breakpoints>
 </Bucket>

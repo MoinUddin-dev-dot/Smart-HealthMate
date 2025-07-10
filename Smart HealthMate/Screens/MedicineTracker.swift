@@ -1,4 +1,6 @@
 import SwiftUI
+import SwiftData // Import SwiftData
+
 
 // MARK: - PanelType Enum (Defines which main screen/tab is active)
 enum PanelType: Identifiable, Equatable, CaseIterable { // Make CaseIterable for easier iteration
@@ -162,7 +164,7 @@ struct MedicineTracker: View {
         switch activePanel {
         case .medicines:
             // Pass the medicines binding for CRUD operations
-            MedicineListView(medicines: $medicines)
+            MedicineListView()
         case .reminders:
             RemindersScreen(medicinesCount: medicines.count, reminders: $reminders)
         case .vitalsMonitoring:
@@ -266,23 +268,17 @@ extension View {
     }
 }
 
-//struct RoundedCorner: Shape {
-//    var radius: CGFloat = .infinity
-//    var corners: UIRectCorner = .allCorners
-//
-//    func path(in rect: CGRect) -> Path {
-//        let path = UIBezierPath(roundedRect: rect, byRoundingCorners: corners, cornerRadii: CGSize(width: radius, height: radius))
-//        return Path(path.cgPath)
-//    }
-//}
+
 
 // MARK: - MedicineListView (First Tab Content)
+
 struct MedicineListView: View {
-    @Binding var medicines: [Medicine]
+    @Environment(\.modelContext) private var modelContext
+    @Query(sort: \Medicine.lastModifiedDate, order: .reverse) private var medicines: [Medicine]
     @State private var showingAddMedicineSheet = false
     @State private var medicineToEdit: Medicine?
     @State private var showingInactiveMedicinesSheet = false
-    @State private var refreshID = UUID() // To force redraws if SwiftUI misses something
+    @State private var refreshID = UUID()
 
     private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -290,145 +286,193 @@ struct MedicineListView: View {
         return formatter
     }()
 
-    // Computed property for active medicines, based on the main 'medicines' array
     private var activeMedicines: [Medicine] {
-        medicines.filter { medicine in
-            let isActiveFlag = medicine.isActive // State from the toggle in the sheet
-            let isDateCurrentlyActive = medicine.isCurrentlyActiveBasedOnDates // State based on dates
-            
-            // A medicine is truly "active" if its isActive flag is true AND its dates are currently valid.
+        let filtered = filterActiveMedicines(medicines: medicines)
+        let sorted = sortMedicines(filteredMedicines: filtered)
+        return sorted
+    }
+
+    private func onEditAction(_ medicine: Medicine) {
+        medicineToEdit = medicine
+        showingAddMedicineSheet = true
+    }
+
+    private var mainContent: some View {
+        MainContentScrollView(
+            activeMedicines: activeMedicines,
+            refreshID: $refreshID,
+            onEdit: onEditAction,
+            onDelete: deleteMedicine
+        )
+    }
+
+    private var addMedicineSheet: some View {
+        AddNewMedicineSheetView(medicineToEdit: $medicineToEdit) { savedMedicine in
+            print("✅ MedicineListView: Add/Edit sheet completed for '\(savedMedicine.name)' (id: \(savedMedicine.id))")
+        }
+    }
+
+    private var inactiveMedicinesSheet: some View {
+        InactiveMedicinesListView { activatedMedicine in
+            print("Medicine '\(activatedMedicine.name)' activated from inactive list. Parent will re-filter.")
+            refreshID = UUID()
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            mainContent
+                .navigationTitle("Medicine Tracker")
+                .toolbar {
+                    MedicineListToolbar(
+                        showingInactiveMedicinesSheet: $showingInactiveMedicinesSheet,
+                        showingAddMedicineSheet: $showingAddMedicineSheet,
+                        medicineToEdit: $medicineToEdit
+                    )
+                }
+                .sheet(isPresented: $showingAddMedicineSheet, onDismiss: {
+                    print("Add/Edit sheet dismissed. Forcing refresh...")
+                    refreshID = UUID()
+                }, content: { addMedicineSheet })
+                .sheet(isPresented: $showingInactiveMedicinesSheet, content: { inactiveMedicinesSheet })
+                .onChange(of: medicines) { _, newMedicines in
+                    Task {
+                        await autoInactivateMedicines(newMedicines)
+                    }
+                }
+        }
+    }
+
+    private func autoInactivateMedicines(_ newMedicines: [Medicine]) async {
+        var changedSomething = false
+        for medicine in newMedicines {
+            if medicine.isActive && (medicine.hasPeriodEnded() || medicine.isFutureMedicine) {
+                let currentMedicineID = medicine.id
+                do {
+                    let descriptor = FetchDescriptor<Medicine>(predicate: #Predicate { m in
+                        m.id == currentMedicineID
+                    })
+                    if let mutableMedicine = try modelContext.fetch(descriptor).first {
+                        mutableMedicine.isActive = false
+                        mutableMedicine.inactiveDate = mutableMedicine.hasPeriodEnded() ? (mutableMedicine.inactiveDate ?? Date()) : nil
+                        mutableMedicine.lastModifiedDate = Date()
+                        changedSomething = true
+                        print("Auto-inactivated: \(mutableMedicine.name)")
+                    }
+                } catch {
+                    print("Error fetching medicine for auto-inactivation: \(error)")
+                }
+            }
+        }
+        if changedSomething {
+            refreshID = UUID()
+            print("Medicine list updated after auto-inactivation and UI refreshed.")
+        }
+    }
+
+    private func filterActiveMedicines(medicines: [Medicine]) -> [Medicine] {
+        return medicines.filter { medicine in
+            let isActiveFlag = medicine.isActive
+            let isDateCurrentlyActive = medicine.isCurrentlyActiveBasedOnDates
             let shouldBeActive = isActiveFlag && isDateCurrentlyActive
-            print("🔍 Filter Check: \(medicine.name) | Toggle isActive: \(isActiveFlag), isCurrentlyActiveBasedOnDates: \(isDateCurrentlyActive) => Result: \(shouldBeActive ? "ACTIVE" : "INACTIVE")")
-            
             return shouldBeActive
         }
-        .sorted { (med1, med2) in
-            // Your existing sorting logic
-            if med1.lastModifiedDate > med2.lastModifiedDate { return true }
-            if med1.lastModifiedDate < med2.lastModifiedDate { return false }
-            if med1.hasMissedDoseToday && !med2.hasMissedDoseToday { return true }
-            if !med1.hasMissedDoseToday && med2.hasMissedDoseToday { return false }
+    }
+
+    private func sortMedicines(filteredMedicines: [Medicine]) -> [Medicine] {
+        return filteredMedicines.sorted { (med1, med2) in
+            let lastModifiedComparison = med1.lastModifiedDate.compare(med2.lastModifiedDate)
+            if lastModifiedComparison != .orderedSame {
+                return lastModifiedComparison == .orderedDescending
+            }
+            let missedDoseComparison = (med1.hasMissedDoseToday && !med2.hasMissedDoseToday)
+            if missedDoseComparison { return true }
+            if (!med1.hasMissedDoseToday && med2.hasMissedDoseToday) { return false }
             return med1.name < med2.name
         }
     }
 
+    private func deleteMedicine(medicineId: UUID) {
+        Task {
+            do {
+                let descriptor = FetchDescriptor<Medicine>(predicate: #Predicate { $0.id == medicineId })
+                if let medicineToDelete = try modelContext.fetch(descriptor).first {
+                    modelContext.delete(medicineToDelete)
+                    try modelContext.save()
+                    print("Medicine deleted with ID: \(medicineId)")
+                    refreshID = UUID()
+                }
+            } catch {
+                print("Error fetching medicine for deletion: \(error)")
+            }
+        }
+    }
+}
+
+
+/// Encapsulates the main scrollable content of the MedicineListView.
+/// This significantly reduces the complexity of the parent MedicineListView's body.
+struct MainContentScrollView: View {
+    let activeMedicines: [Medicine]
+    @Binding var refreshID: UUID
+    let onEdit: (Medicine) -> Void
+    let onDelete: (UUID) -> Void
+    // Remove onDoseTaken
 
     var body: some View {
-        NavigationStack {
-            GeometryReader { geometry in
-                ScrollView(showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 20) {
-                        SMAMedicineTrackerHeader()
-                        SMAMedicineTrackerStats(medicinesCount: activeMedicines.count) // Use the new computed property
-                        
-                        LazyVStack(spacing: 15) {
-                            if activeMedicines.isEmpty {
-                                Text("No active medicines added yet. Tap '+' to add one!")
-                                    .foregroundColor(.gray)
-                                    .padding()
-                                    .frame(maxWidth: .infinity)
-                            } else {
-                                ForEach(activeMedicines) { medicine in // Iterate directly over activeMedicines
-                                    MedicineDetailCardView(
-                                        medicine: medicine, // Pass the filtered medicine
-                                        onTakenStatusChanged: { medicineId, doseId, newIsTakenStatus in
-                                            if let medIndex = medicines.firstIndex(where: { $0.id == medicineId }),
-                                               let doseIndex = medicines[medIndex].scheduledDoses.firstIndex(where: { $0.id == doseId }) {
-                                                medicines[medIndex].scheduledDoses[doseIndex].isTaken = newIsTakenStatus
-                                                print("Updated \(medicines[medIndex].name) dose at \(MedicineListView.timeFormatter.string(from: medicines[medIndex].scheduledDoses[doseIndex].time)) to Taken: \(newIsTakenStatus)")
-                                                // Trigger a refresh only if needed (usually direct @State changes are enough)
-                                                refreshID = UUID()
-                                            }
-                                        },
-                                        onEdit: { medicine in
-                                            medicineToEdit = medicine
-                                            showingAddMedicineSheet = true
-                                        },
-                                        onDelete: { medicineId in
-                                            medicines.removeAll(where: { $0.id == medicineId })
-                                            print("Deleted medicine with ID: \(medicineId)")
-                                            // Trigger a refresh only if needed
-                                            refreshID = UUID()
-                                        }
-                                    )
-                                }
+        GeometryReader { geometry in
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 20) {
+                    SMAMedicineTrackerHeader()
+                    SMAMedicineTrackerStats(medicinesCount: activeMedicines.count)
+                    LazyVStack(spacing: 15) {
+                        if activeMedicines.isEmpty {
+                            Text("No active medicines added yet. Tap '+' to add one!")
+                                .foregroundColor(.gray)
+                                .padding()
+                                .frame(maxWidth: .infinity)
+                        } else {
+                            ForEach(activeMedicines) { medicine in
+                                MedicineDetailCardView(
+                                    medicine: medicine,
+                                    onEdit: onEdit,
+                                    onDelete: onDelete
+                                )
                             }
                         }
-                        .padding(.horizontal)
-                        .padding(.bottom, 20)
-                        .id(refreshID) // Key to forcing redraws
                     }
-                    .padding(.bottom, geometry.safeAreaInsets.bottom + 60)
+                    .padding(.horizontal)
+                    .padding(.bottom, 20)
+                    .id(refreshID)
                 }
+                .padding(.bottom, geometry.safeAreaInsets.bottom + 60)
             }
-            .navigationTitle("Medicine Tracker")
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button(action: {
-                        showingInactiveMedicinesSheet = true
-                    }) {
-                        Label("Inactive", systemImage: "archivebox.fill")
-                    }
-                }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(action: {
-                        medicineToEdit = nil
-                        showingAddMedicineSheet = true
-                    }) {
-                        Label("Add Medicine", systemImage: "plus")
-                    }
-                }
-            }
-            .sheet(isPresented: $showingAddMedicineSheet, onDismiss: {
-                print("Add/Edit sheet dismissed. Forcing refresh...")
-                // The onSave closure should handle the main array update,
-                // this onDismiss just ensures the UI updates after the sheet closes.
-                refreshID = UUID()
+        }
+    }
+}
+
+/// Encapsulates the toolbar items for MedicineListView.
+/// This also helps in reducing the complexity of the parent's toolbar modifier.
+private struct MedicineListToolbar: ToolbarContent { // Conforms to ToolbarContent
+    // Use @Binding for state properties that control sheet presentation or data
+    @Binding var showingInactiveMedicinesSheet: Bool
+    @Binding var showingAddMedicineSheet: Bool
+    @Binding var medicineToEdit: Medicine?
+
+    var body: some ToolbarContent {
+        ToolbarItem(placement: .navigationBarLeading) {
+            Button(action: {
+                showingInactiveMedicinesSheet = true
             }) {
-                AddNewMedicineSheetView(medicineToEdit: $medicineToEdit) { savedMedicine in
-                    // MARK: - THE CRITICAL UPDATE LOGIC
-                    if let index = medicines.firstIndex(where: { $0.id == savedMedicine.id }) {
-                        // Found existing medicine, update it
-                        medicines[index] = savedMedicine
-                        print("✅ MedicineListView: Updated existing medicine '\(savedMedicine.name)' (id: \(savedMedicine.id)) with isActive: \(savedMedicine.isActive)")
-                    } else {
-                        // New medicine, add it
-                        medicines.append(savedMedicine)
-                        print("✅ MedicineListView: Added new medicine '\(savedMedicine.name)' (id: \(savedMedicine.id)) with isActive: \(savedMedicine.isActive)")
-                    }
-                    // No need to dismiss the sheet here if AddNewMedicineSheetView handles its own dismissal
-                }
+                Label("Inactive", systemImage: "archivebox.fill")
             }
-            .sheet(isPresented: $showingInactiveMedicinesSheet) {
-                // When InactiveMedicinesListView updates a medicine (making it active),
-                // its internal call to AddNewMedicineSheetView's onSave will modify the main 'medicines' array directly.
-                // The onActivate callback in InactiveMedicinesListView is mostly for informational side effects.
-                InactiveMedicinesListView(medicines: $medicines) { activatedMedicine in
-                    print("Medicine '\(activatedMedicine.name)' activated from inactive list. Parent will re-filter.")
-                    refreshID = UUID() // Force refresh here too, to be safe, as InactiveMedicinesListView is dismissing
-                }
-            }
-            .onChange(of: medicines) { oldMedicines, newMedicines in
-                // This block handles automatic inactivation based on dates.
-                // It's good to keep this, but ensure it doesn't fight with manual changes.
-                var updatedMedicines = newMedicines
-                var changed = false
-                for i in 0..<updatedMedicines.count {
-                    let currentMedicine = updatedMedicines[i]
-                    // If it's currently active AND its dates indicate it should be inactive
-                    if currentMedicine.isActive && (currentMedicine.hasPeriodEnded() || currentMedicine.isFutureMedicine) {
-                        updatedMedicines[i].isActive = false
-                        updatedMedicines[i].inactiveDate = currentMedicine.hasPeriodEnded() ? (currentMedicine.inactiveDate ?? Date()) : nil
-                        updatedMedicines[i].lastModifiedDate = Date()
-                        changed = true
-                        print("Auto-inactivated: \(currentMedicine.name)")
-                    }
-                }
-                if changed {
-                    medicines = updatedMedicines // Assign the updated array back
-                    refreshID = UUID() // Force refresh
-                    print("Medicine list updated after auto-inactivation.")
-                }
+        }
+        ToolbarItem(placement: .navigationBarTrailing) {
+            Button(action: {
+                medicineToEdit = nil // Clear any previous selection for editing
+                showingAddMedicineSheet = true
+            }) {
+                Label("Add Medicine", systemImage: "plus")
             }
         }
     }
@@ -438,32 +482,50 @@ struct MedicineListView: View {
 // MARK: - InactiveMedicinesListView (New View for Inactive Medicines)
 struct InactiveMedicinesListView: View {
     @Environment(\.dismiss) var dismiss // For dismissing this sheet
-    @Binding var medicines: [Medicine] // The main medicines array
+    @Environment(\.modelContext) private var modelContext // Inject ModelContext
+
+    // ⚠️ IMPORTANT: InactiveMedicinesListView will now fetch medicines itself using @Query
+    // Filter to only show inactive medicines (isActive == false)
+    @Query(filter: #Predicate<Medicine> { !$0.isActive }, sort: \Medicine.lastModifiedDate, order: .reverse)
+    var inactiveMedicines: [Medicine]
+
     var onActivate: ((Medicine) -> Void)? // Callback to parent (MedicineListView)
 
     @State private var showingActivateMedicineSheet = false
     @State private var medicineToActivate: Medicine?
 
+    // The inactiveMedicines computed property is no longer needed here
+    // because @Query is directly filtering and sorting them.
+    // However, if you had more complex filtering/sorting logic beyond what @Query predicate/sort offers,
+    // you could still use a computed property on the result of @Query.
+    /*
     private var inactiveMedicines: [Medicine] {
-        // MARK: SIMPLIFIED FILTER: Only check isActive directly
-        medicines.filter { !$0.isActive }
-            .sorted { (med1, med2) in
-                // Sort by most recently inactive
-                if let date1 = med1.inactiveDate, let date2 = med2.inactiveDate {
-                    return date1 > date2
-                }
-                // Fallback to name if inactiveDate is nil or one has it and other doesn't
-                // If one has inactiveDate and the other doesn't (and both are inactive)
-                // prioritize the one with a date (which should be more recent deactivation)
-                if med1.inactiveDate != nil && med2.inactiveDate == nil {
-                    return true // med1 comes first if it has an inactiveDate
-                }
-                if med1.inactiveDate == nil && med2.inactiveDate != nil {
-                    return false // med2 comes first if it has an inactiveDate
-                }
-                return med1.name < med2.name
+        // Step 1: Medicines filter
+        let filtered = medicines.filter { medicine in
+            // Here we use the computed properties of the Medicine model
+            // defined in Medicine.swift.
+            return !medicine.isActive || medicine.hasPeriodEnded() || medicine.isFutureMedicine
+        }
+
+        // Step 2: Sort the filtered medicines
+        let sorted = filtered.sorted { (med1, med2) in
+            // Sort by most recently inactive
+            if let date1 = med1.inactiveDate, let date2 = med2.inactiveDate {
+                return date1 > date2
             }
+            // If inactiveDate is nil or one has it and the other doesn't
+            // (and both are inactive) then sort by name
+            if med1.inactiveDate != nil && med2.inactiveDate == nil {
+                return true // med1 comes first if it has an inactiveDate
+            }
+            if med1.inactiveDate == nil && med2.inactiveDate != nil {
+                return false // med2 comes first if it has an inactiveDate
+            }
+            return med1.name < med2.name
+        }
+        return sorted
     }
+    */
 
     var body: some View {
         NavigationStack {
@@ -475,13 +537,13 @@ struct InactiveMedicinesListView: View {
                         .padding(.horizontal)
                         .padding(.top, 5)
 
-                    if inactiveMedicines.isEmpty {
+                    if inactiveMedicines.isEmpty { // Use the @Query result directly
                         Text("No inactive medicines found.")
                             .foregroundColor(.gray)
                             .padding()
                             .frame(maxWidth: .infinity)
                     } else {
-                        ForEach(inactiveMedicines) { medicine in
+                        ForEach(inactiveMedicines) { medicine in // Iterate directly over @Query result
                             InactiveMedicineCardView(medicine: medicine) { selectedMedicine in
                                 self.medicineToActivate = selectedMedicine
                                 self.showingActivateMedicineSheet = true
@@ -503,20 +565,21 @@ struct InactiveMedicinesListView: View {
             }
             .sheet(isPresented: $showingActivateMedicineSheet) {
                 AddNewMedicineSheetView(medicineToEdit: $medicineToActivate) { savedMedicine in
-                    // When the sheet saves, it will update the `medicines` array via onSave callback.
-                    // This happens directly on the @Binding medicines array.
-                    // So, MedicineListView will automatically re-evaluate its 'activeMedicines' list.
-                    
-                    // You might want to explicitly update the main medicines array here if you pass a copy
-                    // to AddNewMedicineSheetView, but if it's a binding, it updates implicitly.
-                    // For clarity, I'm explicitly updating it here as well, though the binding should handle it.
-                    if let index = medicines.firstIndex(where: { $0.id == savedMedicine.id }) {
-                        medicines[index] = savedMedicine
-                        print("InactiveList: Updated medicine '\(savedMedicine.name)' with isActive: \(savedMedicine.isActive)")
+                    // When the sheet saves, AddNewMedicineSheetView (assuming it uses modelContext)
+                    // will handle the update/insertion in SwiftData.
+                    // Because inactiveMedicines is @Query, it will automatically update.
+
+                    // ⚠️ IMPORTANT: SwiftData handles the update/save.
+                    // medicineToActivate is already a managed object, so updating its properties
+                    // within AddNewMedicineSheetView (which has access to modelContext)
+                    // is automatically saved by SwiftData.
+                    if let medToUpdate = medicineToActivate {
+                        // AddNewMedicineSheetView has already updated properties like isActive.
+                        // Here we just confirm and trigger the onActivate callback.
+                        print("InactiveList: Updated medicine '\(medToUpdate.name)' with isActive: \(medToUpdate.isActive)")
+                        onActivate?(medToUpdate) // Notify parent (MedicineListView) about activation
                     }
 
-                    onActivate?(savedMedicine) // Notify parent (MedicineListView) about activation
-                    
                     // MARK: - CRITICAL FIX: Dismiss the AddNewMedicineSheetView AND InactiveMedicinesListView
                     self.showingActivateMedicineSheet = false // Dismiss the presented sheet
                     self.dismiss() // Dismiss InactiveMedicinesListView itself to trigger parent refresh
@@ -528,46 +591,53 @@ struct InactiveMedicinesListView: View {
 
 // MARK: - InactiveMedicineCardView (Similar to MedicineDetailCardView but for inactive ones)
 struct InactiveMedicineCardView: View {
-    let medicine: Medicine
-    var onActivate: ((_ medicine: Medicine) -> Void)?
+    let medicine: Medicine // The medicine object to display
+    var onActivate: ((_ medicine: Medicine) -> Void)? // Optional callback closure for activation
 
+    // DateFormatter for displaying dates in a medium style (e.g., "Jul 9, 2025")
     private static let itemFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
-        formatter.timeStyle = .none
+        formatter.timeStyle = .none // No time component
         return formatter
     }()
 
     var body: some View {
         HStack(spacing: 0) {
+            // Left-side colored indicator for inactive status
             Rectangle()
-                .fill(Color.orange) // Distinct color for inactive cards
+                .fill(Color.orange) // Distinct orange color for inactive cards
                 .frame(width: 6)
-                .clipShapeWithRoundedCorners(12, corners: [.topLeft, .bottomLeft]) // Corrected name
+                .clipShapeWithRoundedCorners(12, corners: [.topLeft, .bottomLeft]) // Custom corner rounding
 
+            // Main content area of the card
             VStack(alignment: .leading, spacing: 10) {
+                // Top row: Icon, Name, Dosage, and Activate Button
                 HStack(alignment: .top) {
+                    // Pill icon
                     Image(systemName: "pill.fill")
                         .font(.title2)
                         .foregroundColor(Color.orange)
                         .frame(width: 40, height: 40)
-                        .background(Color.orange.opacity(0.2))
-                        .cornerRadius(8) // This is SwiftUI's built-in .cornerRadius
+                        .background(Color.orange.opacity(0.2)) // Light orange background for the icon
+                        .cornerRadius(8) // Standard corner radius for the icon background
 
+                    // Medicine name and dosage
                     VStack(alignment: .leading) {
                         Text(medicine.name)
                             .font(.headline)
                             .fontWeight(.bold)
-                            .lineLimit(1)
-                        
+                            .lineLimit(1) // Limit name to one line
+
                         Text(medicine.dosage)
                             .font(.subheadline)
                             .foregroundColor(.gray)
                     }
-                    Spacer()
+                    Spacer() // Pushes content to the left and Activate button to the right
+
                     // Activate Button
                     Button(action: {
-                        onActivate?(medicine) // Pass the full medicine object
+                        onActivate?(medicine) // Trigger the activation callback
                     }) {
                         Text("Activate")
                             .font(.caption)
@@ -575,58 +645,60 @@ struct InactiveMedicineCardView: View {
                             .foregroundColor(.white)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 5)
-                            .background(Color.green)
-                            .cornerRadius(8) // This is SwiftUI's built-in .cornerRadius
+                            .background(Color.green) // Green background for activation
+                            .cornerRadius(8) // Standard corner radius for the button
                     }
                 }
-                .padding(.bottom, 5)
+                .padding(.bottom, 5) // Padding below the top row
 
+                // Medicine purpose/description tag
                 Text(medicine.purpose)
                     .font(.footnote)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background(Color.gray.opacity(0.1))
-                    .cornerRadius(5) // This is SwiftUI's built-in .cornerRadius
+                    .background(Color.gray.opacity(0.1)) // Light gray background for the purpose
+                    .cornerRadius(5) // Rounded corners for the purpose tag
 
+                // Period display (Start Date - End Date)
                 HStack(spacing: 5) {
                     Image(systemName: "calendar")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    Text("Period: \(medicine.startDate, formatter: InactiveMedicineCardView.itemFormatter) - \(medicine.endDate, formatter: InactiveMedicineCardView.itemFormatter)") // Corrected access
+                    Text("Period: \(medicine.startDate, formatter: InactiveMedicineCardView.itemFormatter) - \(medicine.endDate, formatter: InactiveMedicineCardView.itemFormatter)")
                         .font(.caption)
                         .foregroundColor(.secondary)
                     Spacer()
                 }
-                
-                // Reason for inactivity
+
+                // --- Reason for Inactivity ---
+                // Displays why the medicine is currently inactive based on its properties
                 if !medicine.isActive && medicine.hasPeriodEnded() {
                     Text("Status: Ended on \(medicine.endDate, formatter: InactiveMedicineCardView.itemFormatter)")
                         .font(.caption)
-                        .foregroundColor(.red)
+                        .foregroundColor(.red) // Indicate an ended status with red
                 } else if !medicine.isActive && medicine.startDate > Date() {
                     Text("Status: Starts on \(medicine.startDate, formatter: InactiveMedicineCardView.itemFormatter)")
                         .font(.caption)
-                        .foregroundColor(.orange)
+                        .foregroundColor(.orange) // Indicate a future start date with orange
                 } else if !medicine.isActive && medicine.inactiveDate != nil {
                     Text("Status: Manually Inactive Since \(medicine.inactiveDate!, formatter: InactiveMedicineCardView.itemFormatter)")
                         .font(.caption)
-                        .foregroundColor(.red)
+                        .foregroundColor(.red) // Indicate manual inactivation with red
                 } else {
-                    Text("Status: Inactive (Reason Unknown)") // Fallback
+                    // Fallback for any other inactive state
+                    Text("Status: Inactive (Reason Unknown)")
                         .font(.caption)
                         .foregroundColor(.red)
                 }
 
             }
-            .padding()
-            .background(Color.white)
+            .padding() // Padding for the main content VStack
+            .background(Color.white) // White background for the content area
         }
-        .cornerRadius(12) // This is SwiftUI's built-in .cornerRadius for the whole card
-        .shadow(color: Color.black.opacity(0.1), radius: 5, x: 0, y: 2)
+        .cornerRadius(12) // Apply corner radius to the entire HStack (the whole card)
+        .shadow(color: Color.black.opacity(0.1), radius: 5, x: 0, y: 2) // Subtle shadow for depth
     }
 }
-
-
 
 #Preview {
     MedicineTracker()

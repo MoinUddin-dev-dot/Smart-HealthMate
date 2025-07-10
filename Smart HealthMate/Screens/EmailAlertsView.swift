@@ -23,19 +23,26 @@ struct SMAAlert: Identifiable {
     }
 }
 
+// MARK: - Updated SMAAlertSettings struct
 struct SMAAlertSettings {
     var emergencyContacts: [String]
-    var bpThreshold: SMABPThreshold
-    // Updated to two sugar thresholds
-    var fastingSugarThreshold: Int
-    var afterMealSugarThreshold: Int
+    var bpThreshold: SMABPThreshold // Now contains min/max for systolic/diastolic
+    var fastingSugarThreshold: SMASugarThreshold
+    var afterMealSugarThreshold: SMASugarThreshold
     var enableEmergencyAlerts: Bool
     var enableReminderAlerts: Bool
     var enableReportAlerts: Bool
 
     struct SMABPThreshold {
-        var systolic: Int
-        var diastolic: Int
+        var minSystolic: Int
+        var maxSystolic: Int
+        var minDiastolic: Int
+        var maxDiastolic: Int
+    }
+    
+    struct SMASugarThreshold {
+        var min: Int
+        var max: Int
     }
 }
 
@@ -270,9 +277,9 @@ struct SMAEmailAlertsView: View {
 
     @State private var settings: SMAAlertSettings = SMAAlertSettings(
         emergencyContacts: ["family@example.com", "doctor@example.com"],
-        bpThreshold: SMAAlertSettings.SMABPThreshold(systolic: 180, diastolic: 110),
-        fastingSugarThreshold: 130, // Default for new field
-        afterMealSugarThreshold: 170, // Default for new field
+        bpThreshold: SMAAlertSettings.SMABPThreshold(minSystolic: 70, maxSystolic: 180, minDiastolic: 40, maxDiastolic: 110),
+        fastingSugarThreshold: SMAAlertSettings.SMASugarThreshold(min: 70, max: 130),
+        afterMealSugarThreshold: SMAAlertSettings.SMASugarThreshold(min: 0, max: 179),
         enableEmergencyAlerts: true,
         enableReminderAlerts: true,
         enableReportAlerts: false
@@ -679,33 +686,31 @@ struct SMAEmailAlertsSettingsView: View {
     @State private var contactToEdit: String = ""
     @State private var editedContactValue: String = ""
 
-    // State variables for TextField input (String)
-    @State private var systolicInput: String = ""
-    @State private var diastolicInput: String = ""
-    @State private var fastingSugarInput: String = ""
-    @State private var afterMealSugarInput: String = ""
+    // State variables for TextField input (String) for MIN/MAX
+    @State private var minSystolicInput: String = ""
+    @State private var maxSystolicInput: String = ""
+    @State private var minDiastolicInput: String = ""
+    @State private var maxDiastolicInput: String = ""
+    @State private var minFastingSugarInput: String = ""
+    @State private var maxFastingSugarInput: String = ""
+    @State private var minAfterMealSugarInput: String = ""
+    @State private var maxAfterMealSugarInput: String = ""
 
     // Focus states for each TextField
     private enum Field: Hashable {
-        case systolic
-        case diastolic
-        case fastingSugar
-        case afterMealSugar
+        case minSystolic, maxSystolic
+        case minDiastolic, maxDiastolic
+        case minFastingSugar, maxFastingSugar
+        case minAfterMealSugar, maxAfterMealSugar
     }
     @FocusState private var focusedField: Field?
 
+    // Hardcoded absolute min/max limits (to prevent completely unreasonable user inputs)
+    private let absoluteMinBP: Int = 40
+    private let absoluteMaxBP: Int = 250
+    private let absoluteMinSugar: Int = 0
+    private let absoluteMaxSugar: Int = 600
 
-    // Constants for min/max thresholds
-    let minSystolic: Int = 70
-    let maxSystolic: Int = 200
-    let minDiastolic: Int = 40
-    let maxDiastolic: Int = 150
-    
-    // Updated sugar ranges
-    let minFastingSugar: Int = 70
-    let maxFastingSugar: Int = 140
-    let minAfterMealSugar: Int = 0 // Practical lower bound
-    let maxAfterMealSugar: Int = 179 // Less than 180
 
     // Initialize the local string states with the current settings values
     init(settings: Binding<SMAAlertSettings>, isSettingsOpen: Binding<Bool>, newContact: Binding<String>, addEmergencyContact: @escaping () -> Void, removeEmergencyContact: @escaping (String) -> Void, updateEmergencyContact: @escaping (String, String) -> Void) {
@@ -717,18 +722,38 @@ struct SMAEmailAlertsSettingsView: View {
         self.updateEmergencyContact = updateEmergencyContact
 
         // Initialize local string states from the binding's wrapped value
-        _systolicInput = State(initialValue: String(settings.wrappedValue.bpThreshold.systolic))
-        _diastolicInput = State(initialValue: String(settings.wrappedValue.bpThreshold.diastolic))
-        _fastingSugarInput = State(initialValue: String(settings.wrappedValue.fastingSugarThreshold))
-        _afterMealSugarInput = State(initialValue: String(settings.wrappedValue.afterMealSugarThreshold))
-
+        _minSystolicInput = State(initialValue: String(settings.wrappedValue.bpThreshold.minSystolic))
+        _maxSystolicInput = State(initialValue: String(settings.wrappedValue.bpThreshold.maxSystolic))
+        _minDiastolicInput = State(initialValue: String(settings.wrappedValue.bpThreshold.minDiastolic))
+        _maxDiastolicInput = State(initialValue: String(settings.wrappedValue.bpThreshold.maxDiastolic))
+        _minFastingSugarInput = State(initialValue: String(settings.wrappedValue.fastingSugarThreshold.min))
+        _maxFastingSugarInput = State(initialValue: String(settings.wrappedValue.fastingSugarThreshold.max))
+        _minAfterMealSugarInput = State(initialValue: String(settings.wrappedValue.afterMealSugarThreshold.min))
+        _maxAfterMealSugarInput = State(initialValue: String(settings.wrappedValue.afterMealSugarThreshold.max))
     }
+    
+    // Helper function for consistent validation logic
+    private func validateAndClamp(
+        valueString: String,
+        currentMinSetting: Int,
+        currentMaxSetting: Int,
+        absoluteMin: Int,
+        absoluteMax: Int
+    ) -> Int {
+        if let doubleValue = Double(valueString) {
+            let roundedInt = Int(round(doubleValue))
+            // Clamp within absolute bounds
+            return max(absoluteMin, min(absoluteMax, roundedInt))
+        } else {
+            // If input is empty or invalid, return the current valid setting
+            return currentMinSetting // Or currentMaxSetting, depending on which value is being processed
+        }
+    }
+
 
     var body: some View {
         NavigationView {
-            Form { // Using Form for better organization of settings
-                // Removed Section: "Alert Type Settings"
-                
+            Form {
                 Section(header: Text("Emergency Contacts")) {
                     List {
                         ForEach(settings.emergencyContacts, id: \.self) { contact in
@@ -755,7 +780,6 @@ struct SMAEmailAlertsSettingsView: View {
                                 }
                                 .buttonStyle(.plain)
                             }
-                            // Swipe actions also remain as an alternative removal method
                             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                                 Button(role: .destructive) {
                                     removeEmergencyContact(contact)
@@ -776,91 +800,191 @@ struct SMAEmailAlertsSettingsView: View {
                     }
                 }
                 
-                Section(header: Text("Blood Pressure Thresholds")) {
+                Section(header: Text("Blood Pressure Thresholds (mmHg)")) {
                     VStack(alignment: .leading) {
-                        Text("Systolic (\(minSystolic)-\(maxSystolic) mmHg)")
+                        Text("Systolic Min")
                             .font(.caption)
                             .foregroundColor(.gray)
-                        TextField("Systolic", text: $systolicInput)
+                        TextField("Min Systolic", text: $minSystolicInput)
                             .keyboardType(.numberPad)
                             .textFieldStyle(RoundedBorderTextFieldStyle())
-                            .focused($focusedField, equals: .systolic) // Assign focus state
-                            .onChange(of: focusedField) { oldValue, newValue in // Use oldValue, newValue for iOS 17+
-                                if oldValue == .systolic && newValue == nil { // Lost focus from this field
-                                    // Perform validation and rounding
-                                    if let doubleValue = Double(systolicInput) {
-                                        let roundedInt = Int(round(doubleValue))
-                                        settings.bpThreshold.systolic = max(minSystolic, min(maxSystolic, roundedInt))
-                                    } else {
-                                        // If input is empty or invalid, reset to the current setting's value
-                                        settings.bpThreshold.systolic = settings.bpThreshold.systolic
-                                    }
-                                    self.systolicInput = String(settings.bpThreshold.systolic) // Update UI
+                            .focused($focusedField, equals: .minSystolic)
+                            .onChange(of: focusedField) { oldValue, newValue in
+                                if oldValue == .minSystolic && newValue == nil {
+                                    let validatedValue = validateAndClamp(
+                                        valueString: minSystolicInput,
+                                        currentMinSetting: settings.bpThreshold.minSystolic,
+                                        currentMaxSetting: settings.bpThreshold.maxSystolic, // Not directly used here, but for consistency
+                                        absoluteMin: absoluteMinBP,
+                                        absoluteMax: absoluteMaxBP
+                                    )
+                                    // Ensure min is not greater than max after validation
+                                    settings.bpThreshold.minSystolic = min(validatedValue, settings.bpThreshold.maxSystolic)
+                                    self.minSystolicInput = String(settings.bpThreshold.minSystolic)
                                 }
                             }
                     }
                     
                     VStack(alignment: .leading) {
-                        Text("Diastolic (\(minDiastolic)-\(maxDiastolic) mmHg)")
+                        Text("Systolic Max")
                             .font(.caption)
                             .foregroundColor(.gray)
-                        TextField("Diastolic", text: $diastolicInput)
+                        TextField("Max Systolic", text: $maxSystolicInput)
                             .keyboardType(.numberPad)
                             .textFieldStyle(RoundedBorderTextFieldStyle())
-                            .focused($focusedField, equals: .diastolic) // Assign focus state
+                            .focused($focusedField, equals: .maxSystolic)
                             .onChange(of: focusedField) { oldValue, newValue in
-                                if oldValue == .diastolic && newValue == nil { // Lost focus from this field
-                                    if let doubleValue = Double(diastolicInput) {
-                                        let roundedInt = Int(round(doubleValue))
-                                        settings.bpThreshold.diastolic = max(minDiastolic, min(maxDiastolic, roundedInt))
-                                    } else {
-                                        settings.bpThreshold.diastolic = settings.bpThreshold.diastolic
-                                    }
-                                    self.diastolicInput = String(settings.bpThreshold.diastolic)
+                                if oldValue == .maxSystolic && newValue == nil {
+                                    let validatedValue = validateAndClamp(
+                                        valueString: maxSystolicInput,
+                                        currentMinSetting: settings.bpThreshold.minSystolic, // For consistency
+                                        currentMaxSetting: settings.bpThreshold.maxSystolic,
+                                        absoluteMin: absoluteMinBP,
+                                        absoluteMax: absoluteMaxBP
+                                    )
+                                    // Ensure max is not less than min after validation
+                                    settings.bpThreshold.maxSystolic = max(validatedValue, settings.bpThreshold.minSystolic)
+                                    self.maxSystolicInput = String(settings.bpThreshold.maxSystolic)
+                                }
+                            }
+                    }
+
+                    VStack(alignment: .leading) {
+                        Text("Diastolic Min")
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                        TextField("Min Diastolic", text: $minDiastolicInput)
+                            .keyboardType(.numberPad)
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                            .focused($focusedField, equals: .minDiastolic)
+                            .onChange(of: focusedField) { oldValue, newValue in
+                                if oldValue == .minDiastolic && newValue == nil {
+                                    let validatedValue = validateAndClamp(
+                                        valueString: minDiastolicInput,
+                                        currentMinSetting: settings.bpThreshold.minDiastolic,
+                                        currentMaxSetting: settings.bpThreshold.maxDiastolic,
+                                        absoluteMin: absoluteMinBP,
+                                        absoluteMax: absoluteMaxBP
+                                    )
+                                    settings.bpThreshold.minDiastolic = min(validatedValue, settings.bpThreshold.maxDiastolic)
+                                    self.minDiastolicInput = String(settings.bpThreshold.minDiastolic)
+                                }
+                            }
+                    }
+                    
+                    VStack(alignment: .leading) {
+                        Text("Diastolic Max")
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                        TextField("Max Diastolic", text: $maxDiastolicInput)
+                            .keyboardType(.numberPad)
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                            .focused($focusedField, equals: .maxDiastolic)
+                            .onChange(of: focusedField) { oldValue, newValue in
+                                if oldValue == .maxDiastolic && newValue == nil {
+                                    let validatedValue = validateAndClamp(
+                                        valueString: maxDiastolicInput,
+                                        currentMinSetting: settings.bpThreshold.minDiastolic,
+                                        currentMaxSetting: settings.bpThreshold.maxDiastolic,
+                                        absoluteMin: absoluteMinBP,
+                                        absoluteMax: absoluteMaxBP
+                                    )
+                                    settings.bpThreshold.maxDiastolic = max(validatedValue, settings.bpThreshold.minDiastolic)
+                                    self.maxDiastolicInput = String(settings.bpThreshold.maxDiastolic)
                                 }
                             }
                     }
                 }
                 
-                Section(header: Text("Blood Sugar Thresholds")) {
+                Section(header: Text("Blood Sugar Thresholds (mg/dL)")) {
                     VStack(alignment: .leading) {
-                        Text("Fasting Sugar (\(minFastingSugar)-\(maxFastingSugar) mg/dL)")
+                        Text("Fasting Sugar Min")
                             .font(.caption)
                             .foregroundColor(.gray)
-                        TextField("Fasting Sugar", text: $fastingSugarInput)
+                        TextField("Min Fasting Sugar", text: $minFastingSugarInput)
                             .keyboardType(.numberPad)
                             .textFieldStyle(RoundedBorderTextFieldStyle())
-                            .focused($focusedField, equals: .fastingSugar) // Assign focus state
+                            .focused($focusedField, equals: .minFastingSugar)
                             .onChange(of: focusedField) { oldValue, newValue in
-                                if oldValue == .fastingSugar && newValue == nil { // Lost focus from this field
-                                    if let doubleValue = Double(fastingSugarInput) {
-                                        let roundedInt = Int(round(doubleValue))
-                                        settings.fastingSugarThreshold = max(minFastingSugar, min(maxFastingSugar, roundedInt))
-                                    } else {
-                                        settings.fastingSugarThreshold = settings.fastingSugarThreshold
-                                    }
-                                    self.fastingSugarInput = String(settings.fastingSugarThreshold)
+                                if oldValue == .minFastingSugar && newValue == nil {
+                                    let validatedValue = validateAndClamp(
+                                        valueString: minFastingSugarInput,
+                                        currentMinSetting: settings.fastingSugarThreshold.min,
+                                        currentMaxSetting: settings.fastingSugarThreshold.max,
+                                        absoluteMin: absoluteMinSugar,
+                                        absoluteMax: absoluteMaxSugar
+                                    )
+                                    settings.fastingSugarThreshold.min = min(validatedValue, settings.fastingSugarThreshold.max)
+                                    self.minFastingSugarInput = String(settings.fastingSugarThreshold.min)
                                 }
                             }
                     }
                     
                     VStack(alignment: .leading) {
-                        Text("After Meal Sugar (<\(maxAfterMealSugar + 1) mg/dL)") // Display as <180
+                        Text("Fasting Sugar Max")
                             .font(.caption)
                             .foregroundColor(.gray)
-                        TextField("After Meal Sugar", text: $afterMealSugarInput)
+                        TextField("Max Fasting Sugar", text: $maxFastingSugarInput)
                             .keyboardType(.numberPad)
                             .textFieldStyle(RoundedBorderTextFieldStyle())
-                            .focused($focusedField, equals: .afterMealSugar) // Assign focus state
+                            .focused($focusedField, equals: .maxFastingSugar)
                             .onChange(of: focusedField) { oldValue, newValue in
-                                if oldValue == .afterMealSugar && newValue == nil { // Lost focus from this field
-                                    if let doubleValue = Double(afterMealSugarInput) {
-                                        let roundedInt = Int(round(doubleValue))
-                                        settings.afterMealSugarThreshold = max(minAfterMealSugar, min(maxAfterMealSugar, roundedInt))
-                                    } else {
-                                        settings.afterMealSugarThreshold = settings.afterMealSugarThreshold
-                                    }
-                                    self.afterMealSugarInput = String(settings.afterMealSugarThreshold)
+                                if oldValue == .maxFastingSugar && newValue == nil {
+                                    let validatedValue = validateAndClamp(
+                                        valueString: maxFastingSugarInput,
+                                        currentMinSetting: settings.fastingSugarThreshold.min,
+                                        currentMaxSetting: settings.fastingSugarThreshold.max,
+                                        absoluteMin: absoluteMinSugar,
+                                        absoluteMax: absoluteMaxSugar
+                                    )
+                                    settings.fastingSugarThreshold.max = max(validatedValue, settings.fastingSugarThreshold.min)
+                                    self.maxFastingSugarInput = String(settings.fastingSugarThreshold.max)
+                                }
+                            }
+                    }
+
+                    VStack(alignment: .leading) {
+                        Text("After Meal Sugar Min")
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                        TextField("Min After Meal Sugar", text: $minAfterMealSugarInput)
+                            .keyboardType(.numberPad)
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                            .focused($focusedField, equals: .minAfterMealSugar)
+                            .onChange(of: focusedField) { oldValue, newValue in
+                                if oldValue == .minAfterMealSugar && newValue == nil {
+                                    let validatedValue = validateAndClamp(
+                                        valueString: minAfterMealSugarInput,
+                                        currentMinSetting: settings.afterMealSugarThreshold.min,
+                                        currentMaxSetting: settings.afterMealSugarThreshold.max,
+                                        absoluteMin: absoluteMinSugar,
+                                        absoluteMax: absoluteMaxSugar
+                                    )
+                                    settings.afterMealSugarThreshold.min = min(validatedValue, settings.afterMealSugarThreshold.max)
+                                    self.minAfterMealSugarInput = String(settings.afterMealSugarThreshold.min)
+                                }
+                            }
+                    }
+                    
+                    VStack(alignment: .leading) {
+                        Text("After Meal Sugar Max")
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                        TextField("Max After Meal Sugar", text: $maxAfterMealSugarInput)
+                            .keyboardType(.numberPad)
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                            .focused($focusedField, equals: .maxAfterMealSugar)
+                            .onChange(of: focusedField) { oldValue, newValue in
+                                if oldValue == .maxAfterMealSugar && newValue == nil {
+                                    let validatedValue = validateAndClamp(
+                                        valueString: maxAfterMealSugarInput,
+                                        currentMinSetting: settings.afterMealSugarThreshold.min,
+                                        currentMaxSetting: settings.afterMealSugarThreshold.max,
+                                        absoluteMin: absoluteMinSugar,
+                                        absoluteMax: absoluteMaxSugar
+                                    )
+                                    settings.afterMealSugarThreshold.max = max(validatedValue, settings.afterMealSugarThreshold.min)
+                                    self.maxAfterMealSugarInput = String(settings.afterMealSugarThreshold.max)
                                 }
                             }
                     }

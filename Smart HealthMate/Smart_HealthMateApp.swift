@@ -33,6 +33,6 @@ struct Smart_HealthMateApp: App {
                     // and tells the .transition how to animate.
                     .animation(.easeInOut(duration: 0.7), value: isUserLoggedIn) // Increased duration to make it more obvious
                 }
-        .modelContainer(for: [User.self, Medication.self, MedicationLog.self, SugarLog.self, MedicationSchedule.self, ChatMessage.self, BPLog.self, AIInsight.self] )
+        .modelContainer(for: [Medicine.self, ScheduledDose.self]) 
     }
 }

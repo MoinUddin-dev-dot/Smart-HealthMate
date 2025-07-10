@@ -5,13 +5,17 @@
 //  Created by Moin on 6/18/25.
 //
 import SwiftUI
+import SwiftData
+
 
 // MARK: - AddNewMedicineSheetView (Updated with compact DatePicker for better UX)
+
 struct AddNewMedicineSheetView: View {
     @Environment(\.dismiss) var dismiss
+    @Environment(\.modelContext) private var modelContext // Inject model context
     var onSave: (Medicine) -> Void
 
-    @Binding var medicineToEdit: Medicine?
+    @Binding var medicineToEdit: Medicine? // Binding for the medicine being edited
 
     @State private var name: String = ""
     @State private var purpose: String = ""
@@ -31,6 +35,7 @@ struct AddNewMedicineSheetView: View {
     @State private var showAlert = false
     @State private var alertMessage = ""
 
+    // Custom initializer to accept a Binding for medicineToEdit
     init(medicineToEdit: Binding<Medicine?>, onSave: @escaping (Medicine) -> Void) {
         self._medicineToEdit = medicineToEdit
         self.onSave = onSave
@@ -40,20 +45,25 @@ struct AddNewMedicineSheetView: View {
         print("AddNewMedicineSheetView: loadMedicineForEditing called. Medicine: \(medicine?.name ?? "nil")")
 
         guard let medicine = medicine else {
+            // Reset states for adding a new medicine
             name = ""
             purpose = ""
             dosage = ""
             selectedTimings = []
             startDate = Calendar.current.startOfDay(for: Date())
             endDate = Calendar.current.startOfDay(for: Date())
-            isActive = true // Default to active for new
+            isActive = true // Default to active for new medicine
             return
         }
         
+        // Load existing medicine data into state variables
         name = medicine.name
         purpose = medicine.purpose
         dosage = medicine.dosage
-        selectedTimings = medicine.scheduledDoses.map { $0.time }.sorted()
+        
+        // FIX: Safely unwrap `scheduledDoses` and map `time` property
+        selectedTimings = medicine.scheduledDoses?.map { $0.time }.sorted() ?? []
+        
         startDate = Calendar.current.startOfDay(for: medicine.startDate)
         
         // When loading for editing, if it's inactive and its period has ended,
@@ -79,7 +89,6 @@ struct AddNewMedicineSheetView: View {
             print("  - First timing: \(AddNewMedicineSheetView.timeFormatter.string(from: selectedTimings.first!))")
         }
     }
-
 
     var body: some View {
         NavigationView {
@@ -162,7 +171,7 @@ struct AddNewMedicineSheetView: View {
 
                             if !isDuplicate {
                                 selectedTimings.append(newTimeToAdd)
-                                newTimeToAdd = Date()
+                                newTimeToAdd = Date() // Reset for next addition
                             } else {
                                 alertMessage = "This time has already been added!"
                                 showAlert = true
@@ -180,7 +189,7 @@ struct AddNewMedicineSheetView: View {
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button("Cancel") {
-                        medicineToEdit = nil
+                        medicineToEdit = nil // Clear editing state on cancel
                         dismiss()
                     }
                 }
@@ -199,6 +208,8 @@ struct AddNewMedicineSheetView: View {
                 print("AddNewMedicineSheetView: .onAppear called.")
                 loadMedicineForEditing(medicineToEdit)
             }
+            // Use .task for loading data when the sheet appears or medicineToEdit changes
+            // .task is generally preferred over .onChange for initial data loading in sheets
             .onChange(of: medicineToEdit) { _, newMedicine in
                 print("AddNewMedicineSheetView: .onChange(of: medicineToEdit) called.")
                 loadMedicineForEditing(newMedicine)
@@ -207,6 +218,7 @@ struct AddNewMedicineSheetView: View {
     }
 
     private func saveMedicine() {
+        // --- Input Validation ---
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             alertMessage = "Medicine name cannot be empty."
             showAlert = true
@@ -237,126 +249,135 @@ struct AddNewMedicineSheetView: View {
             return
         }
 
+        // Create ScheduledDose objects for the relationship
+        // These are not yet inserted into the modelContext. They will be inserted
+        // automatically when assigned to the `medicineToSave`'s `scheduledDoses` property.
         let scheduledDoses = selectedTimings.sorted().map { time in
-            Medicine.ScheduledDose(id: UUID(), time: time, isTaken: false)
+            return ScheduledDose(time: time, isTaken: false)
         }
 
         let formatter = DateFormatter()
         formatter.dateFormat = "h:mm a"
         let timingStringForMedicine = selectedTimings.sorted().map { formatter.string(from: $0) }.joined(separator: ", ")
 
-        var savedMedicine: Medicine
+        var medicineToSave: Medicine // This will be the SwiftData managed object
+
         if let existingMedicine = medicineToEdit { // Editing an existing medicine
-            // Initialize savedMedicine with properties from UI and existing, *before* applying specific logic
-            savedMedicine = Medicine(
-                id: existingMedicine.id,
-                name: name,
-                purpose: purpose,
-                dosage: dosage,
-                timingString: timingStringForMedicine,
-                scheduledDoses: scheduledDoses,
-                startDate: normalizedStartDate,
-                endDate: normalizedEndDate,
-                isActive: isActive, // Use the UI toggle state directly here
-                inactiveDate: existingMedicine.inactiveDate, // Carry over existing inactiveDate initially
-                lastModifiedDate: Date()
-            )
-            
-            // --- MANUAL / DATE-BASED ACTIVE/INACTIVE LOGIC ---
+            // Update the properties of the existing SwiftData managed object
+            existingMedicine.name = name
+            existingMedicine.purpose = purpose
+            existingMedicine.dosage = dosage
+            existingMedicine.timingString = timingStringForMedicine
+            existingMedicine.startDate = normalizedStartDate
+            existingMedicine.endDate = normalizedEndDate
+            existingMedicine.lastModifiedDate = Date()
+
+            // Handle scheduledDoses: Clear old ones and add new ones
+            // SwiftData will automatically handle deletion from the context when the relationship is modified
+            // This assumes your ScheduledDose relationship in Medicine is configured for cascade delete.
+            // If not, you might need to manually delete old doses from modelContext.
+            existingMedicine.scheduledDoses = [] // Clear existing doses
+            existingMedicine.scheduledDoses = scheduledDoses // Assign new doses
+            scheduledDoses.forEach { $0.medicine = existingMedicine } // Set inverse relationship for each new dose
+
+            // --- MANUAL / DATE-BASED ACTIVE/INACTIVE LOGIC (Existing Medicine) ---
             
             // Scenario 1: User explicitly turns OFF the "Is Active" toggle (Manual Deactivation)
-            // This is the most important one for your current bug.
             if !isActive && existingMedicine.isActive { // Toggle was OFF AND it was previously active
-                savedMedicine.isActive = false
-                savedMedicine.inactiveDate = Date() // Set inactive date to now
-                print("DEBUG: Medicine '\(savedMedicine.name)' manually deactivated during edit. isActive: \(savedMedicine.isActive), inactiveDate: \(String(describing: savedMedicine.inactiveDate))")
+                existingMedicine.isActive = false
+                existingMedicine.inactiveDate = Date() // Set inactive date to now
+                print("DEBUG: Medicine '\(existingMedicine.name)' manually deactivated during edit. isActive: \(existingMedicine.isActive), inactiveDate: \(String(describing: existingMedicine.inactiveDate))")
                 showAlert = false // Clear any previous alerts if this is a manual deactivation
             }
             // Scenario 2: User tries to set it ACTIVE, but dates prevent it (Auto-Deactivation/Future Activation)
-            // This happens if isActive is true, but `isCurrentlyActiveBasedOnDates` is false.
-            else if isActive && !savedMedicine.isCurrentlyActiveBasedOnDates {
-                savedMedicine.isActive = false // Override to inactive
-                if savedMedicine.isFutureMedicine { // Check if it's future
-                    savedMedicine.inactiveDate = nil // Clear inactiveDate for future meds
-                    let formattedStartDate = AddNewMedicineSheetView.itemFormatter.string(from: savedMedicine.startDate)
+            else if isActive && !existingMedicine.isCurrentlyActiveBasedOnDates {
+                existingMedicine.isActive = false // Override to inactive
+                if existingMedicine.isFutureMedicine { // Check if it's future
+                    existingMedicine.inactiveDate = nil // Clear inactiveDate for future meds
+                    let formattedStartDate = AddNewMedicineSheetView.itemFormatter.string(from: existingMedicine.startDate)
                     alertMessage = "Medicine saved! It will become active on its start date (\(formattedStartDate))."
-                } else if savedMedicine.hasPeriodEnded() { // Check if period ended
-                    savedMedicine.inactiveDate = savedMedicine.inactiveDate ?? Date() // Set inactive date if not already
+                } else if existingMedicine.hasPeriodEnded() { // Check if period ended
+                    existingMedicine.inactiveDate = existingMedicine.inactiveDate ?? Date() // Set inactive date if not already
                     alertMessage = "Medicine saved! It has already passed its end date and is now inactive."
                 }
                 showAlert = true
-                print("DEBUG: Medicine '\(savedMedicine.name)' auto-deactivated during edit due to dates. isActive: \(savedMedicine.isActive)")
+                print("DEBUG: Medicine '\(existingMedicine.name)' auto-deactivated during edit due to dates. isActive: \(existingMedicine.isActive)")
             }
             // Scenario 3: User turns ON the "Is Active" toggle (Manual Activation) AND dates allow it
-            // This covers re-activating from the inactive list or from a date-based inactivation.
-            else if isActive && !existingMedicine.isActive && savedMedicine.isCurrentlyActiveBasedOnDates {
-                savedMedicine.isActive = true
-                savedMedicine.inactiveDate = nil // Clear inactive date on activation
-                print("DEBUG: Medicine '\(savedMedicine.name)' manually activated. isActive: \(savedMedicine.isActive)")
+            else if isActive && !existingMedicine.isActive && existingMedicine.isCurrentlyActiveBasedOnDates {
+                existingMedicine.isActive = true
+                existingMedicine.inactiveDate = nil // Clear inactive date on activation
+                print("DEBUG: Medicine '\(existingMedicine.name)' manually activated. isActive: \(existingMedicine.isActive)")
                 showAlert = false // Clear any previous alerts if this is a manual activation
             }
             // Scenario 4: User left toggle as is (true or false) and no date conflicts (for existing medicine)
-            // This ensures `inactiveDate` is managed if `isActive` (from toggle) is false but not scenario 1,
-            // or cleared if `isActive` is true but not scenario 3.
             else {
-                // If isActive is false from the toggle (and it was already inactive or just became inactive)
+                existingMedicine.isActive = isActive // Set to the toggle's value
                 if !isActive {
-                    savedMedicine.inactiveDate = savedMedicine.inactiveDate ?? Date() // Ensure it has a date if it's now inactive
-                } else { // If isActive is true from the toggle (and no date conflicts)
-                    savedMedicine.inactiveDate = nil // Ensure it's nil if it's active
+                    existingMedicine.inactiveDate = existingMedicine.inactiveDate ?? Date() // Ensure it has a date if it's now inactive
+                } else {
+                    existingMedicine.inactiveDate = nil // Ensure it's nil if it's active
                 }
-                print("DEBUG: Medicine '\(savedMedicine.name)' active state maintained from toggle. isActive: \(savedMedicine.isActive)")
+                print("DEBUG: Medicine '\(existingMedicine.name)' active state maintained from toggle. isActive: \(existingMedicine.isActive)")
+                showAlert = false // No conflict, clear alert
             }
-            
+            medicineToSave = existingMedicine // The existing object is already managed by SwiftData
+
         } else { // Adding a new medicine
-            // Initialize new medicine with properties from UI toggle state
-            savedMedicine = Medicine(
-                id: UUID(),
+            // Initialize new SwiftData Medicine object
+            medicineToSave = Medicine( // Directly initialize into medicineToSave
+                id: UUID(), // Use UUID() for new objects
                 name: name,
                 purpose: purpose,
                 dosage: dosage,
                 timingString: timingStringForMedicine,
-                scheduledDoses: scheduledDoses,
                 startDate: normalizedStartDate,
                 endDate: normalizedEndDate,
                 isActive: isActive, // Start with user's toggle value
                 lastModifiedDate: Date()
             )
+
+            medicineToSave.scheduledDoses = scheduledDoses // Attach ScheduledDoses to Medicine
+            scheduledDoses.forEach { $0.medicine = medicineToSave } // Set inverse relationship for each dose
+            modelContext.insert(medicineToSave) // Insert the new Medicine object into the model context
             
             // --- MANUAL / DATE-BASED ACTIVE/INACTIVE LOGIC FOR NEW MEDICINE ---
             
             // Scenario A: User explicitly creates it as INACTIVE (toggle was off)
-            if !savedMedicine.isActive {
-                savedMedicine.inactiveDate = Date() // Set inactive date to now
-                print("DEBUG: New medicine '\(savedMedicine.name)' created as inactive. isActive: \(savedMedicine.isActive)")
+            if !medicineToSave.isActive {
+                medicineToSave.inactiveDate = Date() // Set inactive date to now
+                print("DEBUG: New medicine '\(medicineToSave.name)' created as inactive. isActive: \(medicineToSave.isActive)")
             }
             // Scenario B: User creates it as ACTIVE, but dates prevent it (Auto-Deactivation/Future Activation)
-            else if savedMedicine.isActive && !savedMedicine.isCurrentlyActiveBasedOnDates {
-                savedMedicine.isActive = false // Override to inactive
-                if savedMedicine.isFutureMedicine { // Check if it's future
-                    savedMedicine.inactiveDate = nil // Clear inactiveDate for future meds
-                    let formattedStartDate = AddNewMedicineSheetView.itemFormatter.string(from: savedMedicine.startDate)
+            else if medicineToSave.isActive && !medicineToSave.isCurrentlyActiveBasedOnDates {
+                medicineToSave.isActive = false // Override to inactive
+                if medicineToSave.isFutureMedicine { // Check if it's future
+                    medicineToSave.inactiveDate = nil // Clear inactiveDate for future meds
+                    let formattedStartDate = AddNewMedicineSheetView.itemFormatter.string(from: medicineToSave.startDate)
                     alertMessage = "Medicine saved! It will become active on its start date (\(formattedStartDate))."
-                } else if savedMedicine.hasPeriodEnded() { // Check if period ended
-                    savedMedicine.inactiveDate = Date() // Set inactive date to now
+                } else if medicineToSave.hasPeriodEnded() { // Check if period ended
+                    medicineToSave.inactiveDate = Date() // Set inactive date to now
                     alertMessage = "Medicine saved! It has already passed its end date and is now inactive."
                 }
                 showAlert = true
-                print("DEBUG: New medicine '\(savedMedicine.name)' auto-deactivated due to dates. isActive: \(savedMedicine.isActive)")
+                print("DEBUG: New medicine '\(medicineToSave.name)' auto-deactivated due to dates. isActive: \(medicineToSave.isActive)")
             }
             // Scenario C: User creates it as ACTIVE and dates allow it
-            else { // savedMedicine.isActive is true AND savedMedicine.isCurrentlyActiveBasedOnDates is true
-                savedMedicine.inactiveDate = nil // Ensure inactiveDate is nil for new active meds
-                print("DEBUG: New medicine '\(savedMedicine.name)' created as active. isActive: \(savedMedicine.isActive)")
+            else { // medicineToSave.isActive is true AND medicineToSave.isCurrentlyActiveBasedOnDates is true
+                medicineToSave.inactiveDate = nil // Ensure inactiveDate is nil for new active meds
+                print("DEBUG: New medicine '\(medicineToSave.name)' created as active. isActive: \(medicineToSave.isActive)")
             }
         }
         
-        onSave(savedMedicine) // This calls the closure in MedicineListView
-        print("DEBUG: Calling onSave for '\(savedMedicine.name)' with final isActive: \(savedMedicine.isActive)")
-        medicineToEdit = nil
+        // The onSave closure is likely used to update the UI in the parent view,
+        // and should receive the SwiftData managed object.
+        onSave(medicineToSave) // This calls the closure in MedicineListView
+        print("DEBUG: Calling onSave for '\(medicineToSave.name)' with final isActive: \(medicineToSave.isActive)")
+        medicineToEdit = nil // Clear the binding to reset the sheet state
         dismiss()
     }
     
+    // DateFormatters are static properties for efficiency
     private static let itemFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium

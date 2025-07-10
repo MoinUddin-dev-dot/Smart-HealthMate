@@ -33,6 +33,7 @@ struct BPDataView: View {
        }
 }
 
+
 #Preview {
     BPDataView(systolic: 120, diastolic: 80)
         .padding()
