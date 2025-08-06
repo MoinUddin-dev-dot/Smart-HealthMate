@@ -273,6 +273,26 @@ class AuthManager: ObservableObject {
         }
     }
     
+    // New: Send Password Reset Email
+        func sendPasswordReset(email: String) {
+            isLoading = true
+            errorMessage = nil
+            Auth.auth().sendPasswordReset(withEmail: email) { [weak self] error in
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    self.isLoading = false
+                    if let error = error {
+                        self.errorMessage = error.localizedDescription
+                        print("Password Reset Error: \(error.localizedDescription)")
+                        return
+                    }
+                    
+                    self.errorMessage = "Password reset email sent! Please check your inbox and spam folder."
+                    print("Password reset email sent to \(email)")
+                }
+            }
+        }
+    
     // MARK: - Reload User
     // Yeh function user ke latest verification status ko Firebase se fetch karta hai
     func reloadUser() {
@@ -412,7 +432,178 @@ extension UNUserNotificationCenter {
 
 // MARK: - Root View (ContentView)
 // Yeh app ka main entry point hoga, jo authentication state ke hisaab se views dikhayega
+import SwiftUI
 
+struct ForgotPasswordView: View {
+    @EnvironmentObject var authManager: AuthManager
+    @State private var email: String = ""
+    @State private var emailError: String? = nil
+    @State private var showSuccessModal: Bool = false // New state for success modal
+    @Environment(\.dismiss) var dismiss
+
+    // Email validation regex
+    private var isValidEmail: Bool {
+        let emailRegex = "^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$"
+        let predicate = NSPredicate(format: "SELF MATCHES %@", emailRegex)
+        return predicate.evaluate(with: email)
+    }
+
+    var body: some View {
+        ZStack {
+            LinearGradient(gradient: Gradient(colors: [Color.white.opacity(0.7), Color.white.opacity(0.7)]), startPoint: .topLeading, endPoint: .bottomTrailing)
+                .edgesIgnoringSafeArea(.all)
+
+            VStack(spacing: 20) {
+                Spacer()
+
+                VStack(spacing: 5) {
+                    Image("logo")
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 120, height: 120)
+                    Text("HEALTHMATE")
+                        .font(.custom("HelveticaNeue-Bold", size: 24))
+                        .foregroundColor(.black)
+                    Text("YOUR WELLNESS COMPANION")
+                        .font(.custom("HelveticaNeue-Light", size: 14))
+                        .foregroundColor(.gray)
+                }
+                .padding(.top, 50)
+
+                Text("Reset Your Password")
+                    .font(.headline)
+                    .fontWeight(.bold)
+                    .foregroundColor(.gray)
+
+                VStack(spacing: 15) {
+                    TextField("Email", text: $email)
+                        .padding()
+                        .background(Color(.systemGray6))
+                        .cornerRadius(10)
+                        .autocapitalization(.none)
+                        .keyboardType(.emailAddress)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                        )
+                        .onChange(of: email) { _ in
+                            emailError = isValidEmail ? nil : "Please enter a valid email address"
+                            if authManager.errorMessage != nil {
+                                authManager.errorMessage = nil // Clear previous errors
+                            }
+                            showSuccessModal = false // Reset modal when typing
+                        }
+
+                    // Display local email validation error
+                    if let emailError = emailError {
+                        Text(emailError)
+                            .foregroundColor(.red)
+                            .font(.caption)
+                            .padding(.horizontal)
+                    }
+
+                    // Display Firebase errors (but not success message)
+                    if let errorMessage = authManager.errorMessage, !errorMessage.contains("sent") {
+                        Text(errorMessage)
+                            .foregroundColor(.red)
+                            .font(.caption)
+                            .padding(.horizontal)
+                    }
+                }
+                .padding(.horizontal)
+
+                Button("Send Password Reset Email") {
+                    if isValidEmail {
+                        authManager.sendPasswordReset(email: email)
+                    } else {
+                        emailError = "Invalid email format. Please enter a valid email address."
+                    }
+                }
+                .font(.headline)
+                .foregroundColor(.white)
+                .padding()
+                .frame(maxWidth: .infinity)
+                .background(isValidEmail ? Color.orange : Color.gray)
+                .cornerRadius(10)
+                .padding(.horizontal)
+                .disabled(!isValidEmail || authManager.isLoading)
+                .opacity(authManager.isLoading ? 0.7 : 1.0)
+
+                Button("Back to Login") {
+                    dismiss()
+                }
+                .font(.footnote)
+                .foregroundColor(.green)
+                .padding(.top, 10)
+
+                Spacer()
+            }
+
+            // Custom Success Modal
+            if showSuccessModal {
+                Color.black.opacity(0.4)
+                    .edgesIgnoringSafeArea(.all)
+                    .onTapGesture {
+                        // Prevent dismissing by tapping outside
+                    }
+
+                VStack(spacing: 20) {
+                    Image("logo")
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 80, height: 80)
+
+                    Text("HEALTHMATE")
+                        .font(.custom("HelveticaNeue-Bold", size: 20))
+                        .foregroundColor(.black)
+
+                    Text("Password Reset Email Sent!")
+                        .font(.headline)
+                        .fontWeight(.bold)
+                        .foregroundColor(.black)
+
+                    Text("A password reset email has been sent to \(email). Please check your inbox and spam folder.")
+                        .font(.subheadline)
+                        .foregroundColor(.gray)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+
+                    Button("OK") {
+                        withAnimation {
+                            showSuccessModal = false
+                            dismiss() // Return to LoginView
+                        }
+                    }
+                    .font(.headline)
+                    .foregroundColor(.white)
+                    .padding()
+                    .frame(maxWidth: .infinity)
+                    .background(Color.orange)
+                    .cornerRadius(10)
+                    .padding(.horizontal)
+                }
+                .padding()
+                .background(
+                    LinearGradient(gradient: Gradient(colors: [Color.white.opacity(0.9), Color.white.opacity(0.7)]), startPoint: .topLeading, endPoint: .bottomTrailing)
+                )
+                .cornerRadius(15)
+                .shadow(radius: 10)
+                .frame(maxWidth: 300)
+                .transition(.scale.combined(with: .opacity))
+            }
+        }
+        .navigationTitle("Reset Password")
+        .navigationBarHidden(true)
+        .onChange(of: authManager.errorMessage) { _, newValue in
+            if let message = newValue, message.contains("sent") {
+                withAnimation {
+                    showSuccessModal = true
+                    authManager.errorMessage = nil // Clear the message after showing modal
+                }
+            }
+        }
+    }
+}
 
 // MARK: - SignUpView
 struct SignUpView: View {
@@ -766,20 +957,18 @@ struct LoginView: View {
                         }
                         
                         HStack {
-                                                Spacer()
-                                                // Forgot Password link
-                            NavigationLink(destination: VerifyEmailView(authManager: _authManager, ), isActive: $showForgot) {
-                                EmptyView()
-                            }
-                                                Button(action: {
-                                                    // Handle forgot password action
-                                                   showForgot = true
-                                                }) {
-                                                    Text("Forgot Password?")
-                                                        .font(.footnote)
-                                                        .foregroundColor(.green)
+                                                    Spacer()
+                                                    NavigationLink(destination: ForgotPasswordView(), isActive: $showForgot) {
+                                                        EmptyView()
+                                                    }
+                                                    Button(action: {
+                                                        showForgot = true
+                                                    }) {
+                                                        Text("Forgot Password?")
+                                                            .font(.footnote)
+                                                            .foregroundColor(.green)
+                                                    }
                                                 }
-                                            }
                     }
                     .padding(.horizontal,20)
                     
