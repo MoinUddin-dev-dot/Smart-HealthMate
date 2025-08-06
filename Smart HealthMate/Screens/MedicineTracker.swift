@@ -478,6 +478,8 @@ struct MedicineListView: View {
     @State private var medicineToEdit: Medicine?
     @State private var showingInactiveMedicinesSheet = false
     @State private var refreshID = UUID() // Used to force UI refresh
+    @State private var showingScannerSheet = false // State for scanner sheet
+
 
     // SwiftData Query for UserSettings (needed for UserProfileView and linking new medicines)
     @Query private var userSettingsQuery: [UserSettings]
@@ -560,9 +562,15 @@ struct MedicineListView: View {
                         showingInactiveMedicinesSheet: $showingInactiveMedicinesSheet,
                         showingAddMedicineSheet: $showingAddMedicineSheet,
                         medicineToEdit: $medicineToEdit,
-                        isShowingProfilePanel: $isShowingProfilePanel // Pass the binding here
+                        isShowingProfilePanel: $isShowingProfilePanel,
+                        showingScannerSheet: $showingScannerSheet  // Pass the binding here
                     )
                 }
+                .sheet(isPresented: $showingScannerSheet) {
+                               ScannerContentView()
+                                   .presentationDetents([.large])
+                                   .presentationDragIndicator(.visible)
+                           }
                 .sheet(isPresented: $showingAddMedicineSheet, onDismiss: {
                     print("Add/Edit sheet dismissed. Forcing refresh...")
                     refreshID = UUID()
@@ -790,6 +798,8 @@ private struct MedicineListToolbar: ToolbarContent { // Conforms to ToolbarConte
     @Binding var showingAddMedicineSheet: Bool
     @Binding var medicineToEdit: Medicine?
     @Binding var isShowingProfilePanel: Bool // <--- New binding for profile panel
+    @Binding var showingScannerSheet: Bool // New binding for scanner sheet
+
 
     var body: some ToolbarContent {
         // Profile Button - Placed at the leading (left) side of the navigation bar
@@ -821,8 +831,24 @@ private struct MedicineListToolbar: ToolbarContent { // Conforms to ToolbarConte
             })
             {
                 Label("Add Medicine", systemImage: "plus")
+                    
             }.accessibilityIdentifier("plus")
         }
+        
+        // Scanner Button - Leading side
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        withAnimation(.easeInOut) {
+                            showingScannerSheet = true
+                        }
+                    } label: {
+                        Image(systemName: "camera.circle.fill")
+                            .font(.title)
+                            .foregroundColor(.blue)
+                            .accessibilityLabel("Scan Medicine")
+                            .accessibilityIdentifier("scanner")
+                    }
+                }
     }
 }
 
