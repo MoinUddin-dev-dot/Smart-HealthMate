@@ -6,9 +6,17 @@
 //
 
 import SwiftUI
+import SwiftData
 
 struct SugarDataView: View {
-    let value: Int
+    
+    @Query(sort: [SortDescriptor(\VitalReading.date, order: .forward), SortDescriptor(\VitalReading.time, order: .forward)])
+    private var vitals: [VitalReading] // SwiftData automatically keeps this up-to-date
+    
+    private var latestSugar: VitalReading? {
+        vitals.filter { $0.type == .sugar }.last
+    }
+
         var body: some View {
             ZStack(alignment: .leading) {
                 RoundedRectangle(cornerRadius: 10)
@@ -17,7 +25,7 @@ struct SugarDataView: View {
                     Image(systemName: "calendar") // Example icon
                         .foregroundColor(.white)
                     VStack(alignment: .leading) {
-                        Text("\(value)")
+                        Text("\(latestSugar?.sugarLevel ?? 0)")
                             .font(.title)
                             .fontWeight(.bold)
                             .foregroundColor(.white)
@@ -34,7 +42,7 @@ struct SugarDataView: View {
 
 
 
-#Preview {
-    SugarDataView(value: 131)
-        .padding()
-}
+//#Preview {
+//    SugarDataView(value: 131)
+//        .padding()
+//}

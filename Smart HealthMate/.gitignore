@@ -1,0 +1,5 @@
+
+Config.xcconfig
+# Ignore config files
+*.xcconfig
+.env

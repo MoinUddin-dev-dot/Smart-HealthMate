@@ -1,7 +1,179 @@
 import SwiftUI
 import Foundation
+import SwiftData // SwiftData framework ko import karein
+import UserNotifications // Notifications ke liye import karein
+import FirebaseAuth
+import FirebaseFunctions
+import UserNotifications
 
+// Notification Delegate to handle notification responses
+class NotificationDelegate1: NSObject, UNUserNotificationCenterDelegate {
+    private let modelContext: ModelContext
+    
+    init(modelContext: ModelContext) {
+        self.modelContext = modelContext
+        super.init()
+    }
+    
+    @MainActor
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
+        if response.notification.request.identifier.contains("MissedReminderReport") {
+            let missedReminderService = MissedReminderService(authManager: AuthManager())
+            missedReminderService.setModelContext(modelContext)
+            Task {
+                await missedReminderService.checkAndSendMissedReminderEmail()
+            }
+        }
+        completionHandler()
+    }
+}
+
+class MissedReminderService: ObservableObject {
+    private let authManager: AuthManager
+    private let notificationCenter = UNUserNotificationCenter.current()
+    private var modelContext: ModelContext?
+
+    init(authManager: AuthManager) {
+        self.authManager = authManager
+    }
+
+    func setModelContext(_ context: ModelContext) {
+        self.modelContext = context
+    }
+
+    func getMissedReminders(for reminders: [Reminder], date: Date = Date()) -> [(reminder: Reminder, missedTimes: [Date])] {
+        guard let userID = authManager.currentUserUID else {
+            print("🚫 MissedReminderService: No authenticated user. Skipping missed reminder check.")
+            return []
+        }
+        guard let modelContext = modelContext else {
+            print("🚫 MissedReminderService: ModelContext not set. Skipping missed reminder check.")
+            return []
+        }
+
+        let calendar = Calendar.current
+        let todayStartOfDay = calendar.startOfDay(for: date)
+        var missedReminders: [(reminder: Reminder, missedTimes: [Date])] = []
+
+        let userReminders = reminders.filter { $0.userSettings?.userID == userID && $0.active && !$0.hasPeriodEnded && !$0.isFutureReminder }
+
+        for reminder in userReminders {
+            var missedTimes: [Date] = []
+            for time in reminder.times {
+                let components = calendar.dateComponents([.hour, .minute], from: time)
+                guard let hour = components.hour, let minute = components.minute,
+                      let scheduledTimeToday = calendar.date(bySettingHour: hour, minute: minute, second: 0, of: date) else {
+                    continue
+                }
+
+                if reminder.isTimeSlotOverdue(time: time) {
+                    missedTimes.append(scheduledTimeToday)
+                }
+            }
+
+            if !missedTimes.isEmpty {
+                missedReminders.append((reminder: reminder, missedTimes: missedTimes))
+            }
+        }
+
+        return missedReminders
+    }
+
+    func scheduleDailyMissedReminderCheck() {
+        guard let userID = authManager.currentUserUID else {
+            print("🚫 MissedReminderService: No authenticated user. Cannot schedule daily check.")
+            return
+        }
+
+        notificationCenter.removePendingNotificationRequests(withIdentifiers: ["MissedReminderReport-\(userID)"])
+
+        let timeZone = TimeZone(identifier: "Asia/Karachi")! // PKT, UTC+5
+        let calendar = Calendar.current
+        var components = DateComponents()
+        components.hour = 23
+        components.minute = 0
+        components.timeZone = timeZone
+
+        let content = UNMutableNotificationContent()
+        content.title = "Missed Reminder Report"
+        content.body = "Missed reminder report has been emailed."
+        content.sound = .default
+
+        let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: true)
+        let request = UNNotificationRequest(identifier: "MissedReminderReport-\(userID)", content: content, trigger: trigger)
+
+        notificationCenter.add(request) { error in
+            if let error = error {
+                print("🔔 Error scheduling missed reminder report notification: \(error.localizedDescription)")
+            } else {
+                print("🔔 Scheduled missed reminder report notification for 11:00 PM PKT (ID: MissedReminderReport-\(userID))")
+            }
+        }
+    }
+
+    func checkAndSendMissedReminderEmail() async {
+        guard let userID = authManager.currentUserUID,
+              let modelContext = modelContext else {
+            print("🚫 MissedReminderService: No authenticated user or modelContext. Cannot send email.")
+            return
+        }
+
+        do {
+            let userSettingsDescriptor = FetchDescriptor<UserSettings>(predicate: #Predicate { settings in
+                settings.userID == userID
+            })
+            guard let userSettings = try modelContext.fetch(userSettingsDescriptor).first else {
+                print("🚫 MissedReminderService: No UserSettings found for user \(userID).")
+                return
+            }
+            let emergencyContacts = userSettings.alertSettings.emergencyContacts
+            guard !emergencyContacts.isEmpty else {
+                print("🚫 MissedReminderService: No emergency contacts found for user \(userID).")
+                NotificationCenter.default.post(name: NSNotification.Name("NoEmergencyContacts"), object: nil)
+                return
+            }
+
+            let descriptor = FetchDescriptor<Reminder>(predicate: #Predicate { reminder in
+                reminder.userSettings?.userID == userID
+            })
+            let reminders = try modelContext.fetch(descriptor)
+            let missedReminders = getMissedReminders(for: reminders)
+
+            if missedReminders.isEmpty {
+                print("📧 No missed reminders for user \(userID) today. No email sent.")
+                return
+            }
+
+            var emailBody = "Dear Attendant(s),\n\n\(userSettings.userName ?? "User") missed some reminders today:\n\n"
+            let dateFormatter = DateFormatter()
+            dateFormatter.timeStyle = .short
+
+            for (reminder, missedTimes) in missedReminders {
+                emailBody += "- \(reminder.title) (\(reminder.type.displayName)) at \(missedTimes.map { dateFormatter.string(from: $0) }.joined(separator: ", "))\n"
+            }
+
+            emailBody += "\nPlease ensure the user follows their reminder schedule.\nBest regards,\nSmart HealthMate Team"
+
+            let functions = Functions.functions()
+            let data: [String: Any] = [
+                "to": emergencyContacts.joined(separator: ","),
+                "subject": "Smart HealthMate: Missed Reminder Report for \(userSettings.userName ?? "User")",
+                "body": emailBody
+            ]
+
+            do {
+                let result = try await functions.httpsCallable("sendEmail").call(data)
+                print("📧 Successfully sent missed reminder email to \(emergencyContacts.joined(separator: ", ")): \(result.data)")
+            } catch {
+                print("📧 Error calling sendEmail Cloud Function: \(error.localizedDescription)")
+            }
+        } catch {
+            print("🚫 Error fetching data for missed reminder email: \(error.localizedDescription)")
+        }
+    }
+}
 // MARK: - Custom Shape for Specific Corner Radius
+// Ye ek helper struct hai jo kisi bhi view ke specific corners ko round karne ke liye use hota hai.
 struct RoundedCorner: Shape {
     var radius: CGFloat = .infinity
     var corners: UIRectCorner = .allCorners
@@ -12,40 +184,42 @@ struct RoundedCorner: Shape {
     }
 }
 
-// MARK: - Extension to View for convenience
-//extension View {
-//    func clipShapeWithRoundedCorners(_ radius: CGFloat, corners: UIRectCorner) -> some View {
-//        clipShape(RoundedCorner(radius: radius, corners: corners))
-//    }
-//}
 
-// MARK: - Reminder Struct (Updated for Medicine Type and Detailed Completion Tracking)
-struct Reminder: Identifiable, Equatable, Codable {
-    let id: UUID
+// MARK: - Reminder Class (SwiftData Model)
+// Ye hamara data model hai jo SwiftData ke zariye persist kiya jayega.
+// `@Model` macro isse database mein store hone ke qabil banata hai.
+@Model
+final class Reminder { // `struct` se `final class` mein tabdeel kiya gaya
+    // `@Attribute(.unique)` ensure karta hai ke har Reminder ka 'id' unique ho database mein.
+    @Attribute(.unique) var id: UUID
     var title: String
     var type: ReminderType
-    var times: [Date]
-    var startDate: Date
-    var endDate: Date
-    var active: Bool
-    var nextDue: Date
-    // New: To track completion status for each specific time slot for the current day
-    var completedTimes: [Date] // Stores the exact Date (time + current day) when a slot was completed
-    var lastModifiedDate: Date
-    // New: To track the last time completedTimes were reset (for daily reset logic)
+    var times: [Date] // Reminder ke waqt (e.g., 9:00 AM, 2:00 PM)
+    var startDate: Date // Reminder kab se shuru hoga
+    var endDate: Date   // Reminder kab tak chalega
+    var active: Bool    // Kya reminder active hai ya pause kiya gaya hai
+    var nextDue: Date   // Agla waqt jab reminder due hoga (calculation ke liye)
+    // `completedTimes` mein un waqton ko store karte hain jab reminder ke slots complete kiye gaye hain
+    var completedTimes: [Date]
+    var lastModifiedDate: Date // Akhri baar kab modify kiya gaya
+    // `lastResetDate` track karta hai ke `completedTimes` ko akhri baar kab reset kiya gaya tha
+    // (daily reset logic ke liye)
     var lastResetDate: Date?
+    var userSettings: UserSettings?
 
-
+    // Computed property jo reminder type ke hisaab se icon name provide karti hai.
     var iconName: String {
         switch type {
         case .checkup: return "stethoscope"
-        case .medicine: return "pill.fill" // Icon for medicine
+        case .medicine: return "pill.fill"
         }
     }
 
+    // ReminderType enum, jo Reminder class ke andar nested hai.
+    // Ye `Codable` hai taake SwiftData isse asani se store kar sake.
     enum ReminderType: String, CaseIterable, Identifiable, Codable {
         case checkup
-        case medicine // Re-introduced medicine type
+        case medicine
 
         var id: String { self.rawValue }
         var displayName: String {
@@ -56,57 +230,60 @@ struct Reminder: Identifiable, Equatable, Codable {
         }
     }
 
-    // New: Check if a specific time slot for today is completed
-    func isTimeSlotCompleted(time: Date) -> Bool {
-        let calendar = Calendar.current
-        let timeComponents = calendar.dateComponents([.hour, .minute], from: time)
-        
-        // Normalize the completedTimes to only compare hour and minute for the current day
-        return completedTimes.contains { completedDate in
-            let completedComponents = calendar.dateComponents([.hour, .minute], from: completedDate)
-            return completedComponents.hour == timeComponents.hour &&
-                   completedComponents.minute == timeComponents.minute &&
-                   calendar.isDate(completedDate, inSameDayAs: Date()) // Must be completed TODAY
+    // Check karta hai ke aaj ke din ke liye ek specific time slot complete hua hai ya nahi.
+    func isTimeSlotCompleted(time: Date, forDate: Date) -> Bool { // Corrected: Added forDate parameter
+            let calendar = Calendar.current
+            let timeComponents = calendar.dateComponents([.hour, .minute], from: time)
+            
+            return completedTimes.contains { completedDate in
+                let completedComponents = calendar.dateComponents([.hour, .minute], from: completedDate)
+                return completedComponents.hour == timeComponents.hour &&
+                        completedComponents.minute == timeComponents.minute &&
+                        calendar.isDate(completedDate, inSameDayAs: forDate) // Use forDate here
+            }
         }
-    }
     
-    // New: Check if a specific time slot for today is overdue
+    // Check karta hai ke aaj ke din ke liye ek specific time slot overdue hai ya nahi.
     func isTimeSlotOverdue(time: Date) -> Bool {
-        guard active && !hasPeriodEnded && !isFutureReminder else { return false } // Reminder must be active and valid
-        
-        let calendar = Calendar.current
-        let now = Date()
-        
-        // Create a date for the specific time slot on today's date
-        let timeComponents = calendar.dateComponents([.hour, .minute], from: time)
-        guard let scheduledTimeToday = calendar.date(bySettingHour: timeComponents.hour!, minute: timeComponents.minute!, second: 0, of: now) else { return false }
-        
-        // A time slot is overdue if it has passed and it's not marked as completed for today
-        return scheduledTimeToday < now && !isTimeSlotCompleted(time: time)
-    }
+           // Sirf active, non-expired, aur non-future reminders ke liye check karein.
+           guard active && !hasPeriodEnded && !isFutureReminder else { return false }
+           
+           let calendar = Calendar.current
+           let now = Date()
+           
+           // Aaj ke din ke liye specific time slot ki date banayein.
+           let timeComponents = calendar.dateComponents([.hour, .minute], from: time)
+           guard let scheduledTimeToday = calendar.date(bySettingHour: timeComponents.hour!, minute: timeComponents.minute!, second: 0, of: now) else { return false }
+           
+           // Time slot overdue hai agar woh guzar chuka hai aur complete nahi hua hai.
+           return scheduledTimeToday < now && !isTimeSlotCompleted(time: time, forDate: now) // Corrected: Pass 'now' for forDate
+       }
 
-    // Helper to determine if the *entire reminder* is overdue (any active time slot is overdue)
+    // Helper property: Agar koi bhi time slot overdue hai toh poora reminder overdue hai.
     var isOverdue: Bool {
         guard active && !hasPeriodEnded && !isFutureReminder else { return false }
         return times.contains(where: { isTimeSlotOverdue(time: $0) })
     }
     
-    // Helper to determine if the *entire reminder* is completed (all active time slots are completed for today)
+    // Helper property: Agar saare time slots aaj ke din ke liye complete ho gaye hain toh poora reminder complete hai.
+
     var isCompletedForAllTimesToday: Bool {
         guard active && !times.isEmpty else { return false }
-        // A reminder is "completed for today" if all its scheduled times for today are in completedTimes
         return times.allSatisfy { time in
-            isTimeSlotCompleted(time: time)
+            isTimeSlotCompleted(time: time, forDate: Date()) // Corrected: Pass Date()
         }
     }
 
+    // Check karta hai ke reminder ki period khatam ho chuki hai ya nahi.
     var hasPeriodEnded: Bool {
         let calendar = Calendar.current
         let startOfToday = calendar.startOfDay(for: Date())
         let normalizedEndDate = calendar.startOfDay(for: endDate)
         return normalizedEndDate < startOfToday
+        print("d")
     }
 
+    // Check karta hai ke reminder future mein shuru hoga ya nahi.
     var isFutureReminder: Bool {
         let calendar = Calendar.current
         let startOfToday = calendar.startOfDay(for: Date())
@@ -114,25 +291,12 @@ struct Reminder: Identifiable, Equatable, Codable {
         return normalizedStartDate > startOfToday
     }
 
-    static func == (lhs: Reminder, rhs: Reminder) -> Bool {
-        lhs.id == rhs.id &&
-        lhs.title == rhs.title &&
-        lhs.type == rhs.type &&
-        lhs.times == rhs.times &&
-        lhs.startDate == rhs.startDate &&
-        lhs.endDate == rhs.endDate &&
-        lhs.active == rhs.active &&
-        lhs.nextDue == rhs.nextDue &&
-        lhs.completedTimes == rhs.completedTimes && // Compare completedTimes
-        lhs.lastModifiedDate == rhs.lastModifiedDate &&
-        lhs.lastResetDate == rhs.lastResetDate
-    }
-
-    init(id: UUID = UUID(), title: String, type: ReminderType, times: [Date], startDate: Date, endDate: Date, active: Bool, nextDue: Date, completedTimes: [Date] = [], lastModifiedDate: Date = Date(), lastResetDate: Date? = nil) {
+    // Initializer for the Reminder class.
+    init(id: UUID = UUID(), title: String, type: ReminderType, times: [Date], startDate: Date, endDate: Date, active: Bool, nextDue: Date, completedTimes: [Date] = [], lastModifiedDate: Date = Date(), lastResetDate: Date? = nil, userSettings: UserSettings? = nil) {
         self.id = id
         self.title = title
         self.type = type
-        self.times = times.sorted { $0 < $1 }
+        self.times = times.sorted { $0 < $1 } // Times ko hamesha sorted rakhein
         self.startDate = startDate
         self.endDate = endDate
         self.active = active
@@ -140,16 +304,22 @@ struct Reminder: Identifiable, Equatable, Codable {
         self.completedTimes = completedTimes
         self.lastModifiedDate = lastModifiedDate
         self.lastResetDate = lastResetDate
+        self.userSettings = userSettings
     }
 }
-// MARK: - ReminderDetailRow View (Redesigned to match React Card Style)
+
+
+
+
+// MARK: - ReminderDetailRow View
 struct ReminderDetailRow: View {
-    @Binding var reminder: Reminder // Changed to Binding for direct modification
-    var onToggleActive: (UUID) -> Void // Renamed to avoid confusion with time slot toggle
-    var onDelete: (UUID) -> Void
+    var reminder: Reminder
+    var onToggleActive: (UUID, Reminder.ReminderType) -> Void
+    var onDelete: (UUID, Reminder.ReminderType) -> Void
     var onEdit: (Reminder) -> Void
-    // New: Callback when a specific time slot is marked OK/Reopened
-    var onToggleTimeSlotCompletion: (UUID, Date) -> Void
+    var onToggleTimeSlotCompletion: (UUID, Date, Reminder.ReminderType) -> Void
+
+    @State private var internalIsActive: Bool
 
     static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -164,6 +334,19 @@ struct ReminderDetailRow: View {
         return formatter
     }()
 
+    init(reminder: Reminder, onToggleActive: @escaping (UUID, Reminder.ReminderType) -> Void, onDelete: @escaping (UUID, Reminder.ReminderType) -> Void, onEdit: @escaping (Reminder) -> Void, onToggleTimeSlotCompletion: @escaping (UUID, Date, Reminder.ReminderType) -> Void) {
+        self.reminder = reminder
+        self.onToggleActive = onToggleActive
+        self.onDelete = onDelete
+        self.onEdit = onEdit
+        self.onToggleTimeSlotCompletion = onToggleTimeSlotCompletion
+        _internalIsActive = State(initialValue: reminder.active)
+    }
+
+    private func isTimeSlotButtonDisabled(time: Date) -> Bool {
+        return !reminder.active || reminder.hasPeriodEnded || reminder.isFutureReminder || (!reminder.isTimeSlotOverdue(time: time) && !reminder.isTimeSlotCompleted(time: time, forDate: Date()))
+    }
+
     var body: some View {
         ZStack(alignment: .leading) {
             RoundedRectangle(cornerRadius: 12)
@@ -173,7 +356,7 @@ struct ReminderDetailRow: View {
             Rectangle()
                 .fill(borderTint)
                 .frame(width: 4)
-                .clipShapeWithRoundedCorners(12, corners: [.topLeft, .bottomLeft])
+                .clipShape(RoundedCorner(radius: 12, corners: [.topLeft, .bottomLeft]))
 
             VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .top) {
@@ -191,11 +374,9 @@ struct ReminderDetailRow: View {
                             .foregroundColor(.primary)
                         
                         Text(reminder.type.displayName)
-                                                    .font(.subheadline)
-                                                    .foregroundColor(.secondary)
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
 
-
-                        // Display all times and their individual statuses
                         VStack(alignment: .leading, spacing: 4) {
                             ForEach(reminder.times.sorted(), id: \.self) { time in
                                 HStack {
@@ -205,7 +386,6 @@ struct ReminderDetailRow: View {
                                     
                                     Spacer()
                                     
-                                    // Status Badge for individual time slot
                                     if reminder.isTimeSlotOverdue(time: time) {
                                         Text("Overdue")
                                             .font(.caption2)
@@ -215,7 +395,7 @@ struct ReminderDetailRow: View {
                                             .background(Color.red.opacity(0.15))
                                             .foregroundColor(.red.opacity(0.9))
                                             .cornerRadius(4)
-                                    } else if reminder.isTimeSlotCompleted(time: time) {
+                                    } else if reminder.isTimeSlotCompleted(time: time, forDate: Date()) {
                                         Text("Done")
                                             .font(.caption2)
                                             .fontWeight(.bold)
@@ -235,30 +415,29 @@ struct ReminderDetailRow: View {
                                             .cornerRadius(4)
                                     }
                                     
-                                    // OK/Reopen button for individual time slot
                                     Button(action: {
-                                        onToggleTimeSlotCompletion(reminder.id, time)
+                                        onToggleTimeSlotCompletion(reminder.id, time, reminder.type)
                                     }) {
-                                        Image(systemName: reminder.isTimeSlotCompleted(time: time) ? "arrow.counterclockwise.circle.fill" : "checkmark.circle.fill")
+                                        Image(systemName: reminder.isTimeSlotCompleted(time: time, forDate: Date()) ? "arrow.counterclockwise.circle.fill" : "checkmark.circle.fill")
                                             .font(.title3)
-                                            .foregroundColor(reminder.isTimeSlotCompleted(time: time) ? .gray : .green)
+                                            .foregroundColor(reminder.isTimeSlotCompleted(time: time, forDate: Date()) ? .gray : .green)
                                     }
-                                    .buttonStyle(.plain) // Prevent default button styling
-                                    // Validation: Can only check if overdue, or uncheck if already completed
-                                    .disabled(!reminder.active || reminder.hasPeriodEnded || reminder.isFutureReminder || (!reminder.isTimeSlotOverdue(time: time) && !reminder.isTimeSlotCompleted(time: time)))
+                                    .accessibilityIdentifier("takenReminder")
+                                    .buttonStyle(.plain)
+                                    .disabled(isTimeSlotButtonDisabled(time: time))
                                 }
                             }
                         }
                     }
                     Spacer()
                     
-                    // Toggle for reminder active state
-                    Toggle(isOn: $reminder.active) {
+                    Toggle(isOn: $internalIsActive) {
                         EmptyView()
                     }
                     .labelsHidden()
-                    .onChange(of: reminder.active) { _, newValue in
-                        onToggleActive(reminder.id)
+                    .onChange(of: internalIsActive) { _, newValue in
+                        reminder.active = newValue
+                        onToggleActive(reminder.id, reminder.type)
                     }
                 }
 
@@ -275,7 +454,6 @@ struct ReminderDetailRow: View {
                     }
                     Spacer()
                     
-                    // Edit Button (only for Health Checkup reminders)
                     if reminder.type == .checkup {
                         Button(action: {
                             onEdit(reminder)
@@ -287,9 +465,8 @@ struct ReminderDetailRow: View {
                         .buttonStyle(.plain)
                     }
                     
-                    // Delete Button
                     Button(action: {
-                        onDelete(reminder.id)
+                        onDelete(reminder.id, reminder.type)
                     }) {
                         Image(systemName: "trash.circle.fill")
                             .font(.title2)
@@ -299,10 +476,10 @@ struct ReminderDetailRow: View {
                 }
             }
             .padding(16)
-            .padding(.leading, 4) // Offset for the side border
+            .padding(.leading, 4)
         }
         .padding(.horizontal)
-        .padding(.vertical,10)
+        .padding(.vertical, 10)
     }
 
     private var backgroundTint: Color {
@@ -348,11 +525,11 @@ struct ReminderDetailRow: View {
             return .blue.opacity(0.1)
         }
     }
-    
+
     private func textColorForTimeSlot(_ time: Date) -> Color {
         if !reminder.active || reminder.hasPeriodEnded || reminder.isFutureReminder {
             return .gray
-        } else if reminder.isTimeSlotCompleted(time: time) {
+        } else if reminder.isTimeSlotCompleted(time: time, forDate: Date()) {
             return .green
         } else if reminder.isTimeSlotOverdue(time: time) {
             return .red
@@ -362,8 +539,7 @@ struct ReminderDetailRow: View {
     }
 }
 
-
-// MARK: - ReminderSummaryCard (New View for the top summary cards)
+// MARK: - ReminderSummaryCard
 struct ReminderSummaryCard: View {
     let title: String
     let subtitle: String
@@ -383,12 +559,12 @@ struct ReminderSummaryCard: View {
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 12)
-                    .stroke(tintColor.opacity(0.2), lineWidth: 1) // Subtle border
+                    .stroke(tintColor.opacity(0.2), lineWidth: 1)
             )
-            .shadow(color: Color.black.opacity(0.05), radius: 3, x: 0, y: 2) // Consistent shadow
-            .frame(maxWidth: .infinity) // Ensures card expands horizontally
-            .aspectRatio(4/1, contentMode: .fit) // Adjusted aspect ratio for smaller cards
-            .overlay( // Content goes inside the overlay
+            .shadow(color: Color.black.opacity(0.05), radius: 3, x: 0, y: 2)
+            .frame(maxWidth: .infinity)
+            .aspectRatio(4/1, contentMode: .fit)
+            .overlay(
                 HStack(alignment: .center) {
                     VStack(alignment: .leading) {
                         Text(title)
@@ -403,29 +579,50 @@ struct ReminderSummaryCard: View {
                     Image(systemName: iconName)
                         .font(.title2)
                         .padding(8)
-                        .background(tintColor.opacity(0.2)) // Icon background tint
+                        .background(tintColor.opacity(0.2))
                         .clipShape(Circle())
                         .foregroundColor(tintColor.opacity(0.7))
                 }
-                .padding(10) // Slightly reduced padding inside the card content
+                .padding(10)
             )
     }
 }
 
-// MARK: - AddNewReminderSheetView (New View for the Add Reminder Dialog/Sheet)
+
+
+// MARK: - AddNewReminderSheetView (New View for the Add/Edit Reminder Dialog/Sheet)
+// Naye reminders add karne ya existing reminders ko edit karne ke liye sheet.
+
+
+// MARK: - AddNewReminderSheetView (New View for the Add/Edit Reminder Dialog/Sheet)
+// Naye reminders add karne ya existing reminders ko edit karne ke liye sheet.
 struct AddNewReminderSheetView: View {
     @Environment(\.dismiss) var dismiss
-    @Binding var reminderToEdit: Reminder? // New binding for editing
+    @Environment(\.modelContext) private var modelContext
+    @EnvironmentObject var authManager: AuthManager
+    @Binding var reminderToEdit: Reminder?
     var onSave: (Reminder) -> Void
 
     @State private var title: String = ""
-    @State private var type: Reminder.ReminderType = .checkup // Fixed to .checkup for new additions
-    @State private var selectedTimes: [Date] = [Calendar.current.date(bySettingHour: 9, minute: 0, second: 0, of: Date())!] // For multiple times
+    @State private var var_type: Reminder.ReminderType = .checkup
+    @State private var selectedTimes: [Date] = [Calendar.current.date(bySettingHour: 9, minute: 0, second: 0, of: Date())!]
     @State private var startDate: Date = Calendar.current.startOfDay(for: Date())
     @State private var endDate: Date = Calendar.current.date(byAdding: .month, value: 1, to: Date())!
-    
-    // Internal state to manage individual time inputs (for UX)
     @State private var newTime: Date = Date()
+    @State private var showAlert = false
+    @State private var alertMessage = ""
+
+    @Query private var userSettingsQuery: [UserSettings]
+
+    private var currentUserSettings: UserSettings {
+        if let settings = userSettingsQuery.first(where: { $0.userID == authManager.currentUserUID }) {
+            return settings
+        } else {
+            let newSettings = UserSettings(userID: authManager.currentUserUID ?? "unknown", userName: authManager.currentUserDisplayName)
+            modelContext.insert(newSettings)
+            return newSettings
+        }
+    }
 
     var isEditMode: Bool { reminderToEdit != nil }
 
@@ -434,23 +631,28 @@ struct AddNewReminderSheetView: View {
             Form {
                 Section("Reminder Details") {
                     TextField("Reminder Title (e.g., Blood Pressure Check)", text: $title)
-                    // Picker for Type is fixed to .checkup and disabled
-                    Picker("Reminder Type", selection: $type) {
+                        .accessibilityIdentifier("reminderTitle")
+                    Picker("Reminder Type", selection: $var_type) {
                         Text(Reminder.ReminderType.checkup.displayName).tag(Reminder.ReminderType.checkup)
                     }
-                    .disabled(true) // Disable selection as it's fixed to Health Checkup
+                    .disabled(true)
                 }
 
                 Section("Schedule Times (Daily)") {
-                    ForEach(selectedTimes.sorted(), id: \.self) { time in
-                        HStack {
-                            Text(time, formatter: ReminderDetailRow.timeFormatter)
-                            Spacer()
-                            Button(role: .destructive) {
-                                selectedTimes.removeAll(where: { $0 == time })
-                            } label: {
-                                Image(systemName: "minus.circle.fill")
-                                    .foregroundColor(.red)
+                    if selectedTimes.isEmpty {
+                        Text("No timings added yet.")
+                            .foregroundColor(.gray)
+                    } else {
+                        ForEach(selectedTimes.sorted(), id: \.self) { time in
+                            HStack {
+                                Text(time, formatter: ReminderDetailRow.timeFormatter)
+                                Spacer()
+                                Button(role: .destructive) {
+                                    selectedTimes.removeAll(where: { $0 == time })
+                                } label: {
+                                    Image(systemName: "minus.circle.fill")
+                                        .foregroundColor(.red)
+                                }
                             }
                         }
                     }
@@ -461,11 +663,14 @@ struct AddNewReminderSheetView: View {
                         Button("Add") {
                             if !selectedTimes.contains(where: { Calendar.current.isDate($0, equalTo: newTime, toGranularity: .minute) }) {
                                 selectedTimes.append(newTime)
-                                selectedTimes.sort() // Keep times sorted
+                                selectedTimes.sort()
+                            } else {
+                                alertMessage = "This time has already been added!"
+                                showAlert = true
                             }
-                            newTime = Date() // Reset for next input
+                            newTime = Date()
                         }
-                        .disabled(selectedTimes.count >= 5) // Limit number of times if desired
+                        .disabled(selectedTimes.count >= 5)
                     }
                 }
 
@@ -484,64 +689,95 @@ struct AddNewReminderSheetView: View {
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Save") {
-                        let calendar = Calendar.current
-                        var components = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: Date())
-                        // For nextDue, we can pick the first time today, or simply the earliest time from 'times'
-                        // If times are empty, nextDue won't be meaningful, so we enforce at least one time.
-                        let nextDueTime = selectedTimes.first ?? Date() // Use first time for nextDue calculation
-                        let selectedTimeComponents = calendar.dateComponents([.hour, .minute], from: nextDueTime)
-                        
-                        components.hour = selectedTimeComponents.hour
-                        components.minute = selectedTimeComponents.minute
-                        
-                        let calculatedNextDue = calendar.date(from: components) ?? Date()
-                        
-                        // Ensure at least one time is selected for a new reminder
-                        guard !title.isEmpty && !selectedTimes.isEmpty else { return }
-
-                        let savedReminder = Reminder(
-                            id: reminderToEdit?.id ?? UUID(),
-                            title: title,
-                            type: type, // Will always be .checkup for new additions
-                            times: selectedTimes,
-                            startDate: Calendar.current.startOfDay(for: startDate), // Normalize dates to start of day
-                            endDate: Calendar.current.startOfDay(for: endDate),
-                            active: reminderToEdit?.active ?? true, // Preserve active state if editing
-                            nextDue: calculatedNextDue,
-                            completedTimes: reminderToEdit?.completedTimes ?? [], // Preserve completed times if editing, else empty
-                            lastModifiedDate: Date(), // Update last modified date
-                            lastResetDate: reminderToEdit?.lastResetDate // Preserve last reset date if editing
-                        )
-                        onSave(savedReminder)
-                        dismiss()
+                        saveReminder()
                     }
-                    .disabled(title.isEmpty || selectedTimes.isEmpty) // Disable save if title or times are empty
+                    .accessibilityIdentifier("saveReminder")
+                    .disabled(title.isEmpty || selectedTimes.isEmpty)
                 }
+            }
+            .alert("Error", isPresented: $showAlert) {
+                Button("OK") { }
+            } message: {
+                Text(alertMessage)
             }
             .onAppear {
                 if let reminder = reminderToEdit {
-                    // Only allow editing for .checkup type
                     if reminder.type == .checkup {
                         title = reminder.title
-                        type = reminder.type
-                        selectedTimes = reminder.times // Load existing times
+                        var_type = reminder.type
+                        selectedTimes = reminder.times
                         startDate = reminder.startDate
                         endDate = reminder.endDate
                     } else {
-                        // If it's a medicine type, we shouldn't be here, but just in case, dismiss.
                         dismiss()
                     }
                 }
             }
         }
     }
+
+    private func saveReminder() {
+        guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            alertMessage = "Reminder title cannot be empty."
+            showAlert = true
+            return
+        }
+        guard !selectedTimes.isEmpty else {
+            alertMessage = "Please add at least one scheduled time."
+            showAlert = true
+            return
+        }
+        guard startDate <= endDate else {
+            alertMessage = "Start date cannot be after end date."
+            showAlert = true
+            return
+        }
+
+        let calendar = Calendar.current
+        var components = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: Date())
+        let nextDueTime = selectedTimes.first ?? Date()
+        let selectedTimeComponents = calendar.dateComponents([.hour, .minute], from: nextDueTime)
+        
+        components.hour = selectedTimeComponents.hour
+        components.minute = selectedTimeComponents.minute
+        
+        let calculatedNextDue = calendar.date(from: components) ?? Date()
+        
+        if let existingReminder = reminderToEdit {
+            existingReminder.title = title
+            existingReminder.type = var_type
+            existingReminder.times = selectedTimes
+            existingReminder.startDate = Calendar.current.startOfDay(for: startDate)
+            existingReminder.endDate = Calendar.current.startOfDay(for: endDate)
+            existingReminder.nextDue = calculatedNextDue
+            existingReminder.lastModifiedDate = Date()
+            onSave(existingReminder)
+        } else {
+            let newReminder = Reminder(
+                title: title,
+                type: var_type,
+                times: selectedTimes,
+                startDate: Calendar.current.startOfDay(for: startDate),
+                endDate: Calendar.current.startOfDay(for: endDate),
+                active: true,
+                nextDue: calculatedNextDue,
+                completedTimes: [],
+                lastModifiedDate: Date(),
+                lastResetDate: nil,
+                userSettings: currentUserSettings
+            )
+            modelContext.insert(newReminder)
+            onSave(newReminder)
+        }
+        dismiss()
+    }
 }
 
-// MARK: - NoRemindersPlaceholderView (New View for when no reminders exist)
+// MARK: - NoRemindersPlaceholderView
 struct NoRemindersPlaceholderView: View {
     var body: some View {
         VStack(spacing: 16) {
-            Image(systemName: "bell.slash.fill") // A bell with a slash, indicating no reminders
+            Image(systemName: "bell.slash.fill")
                 .font(.largeTitle)
                 .padding(16)
                 .background(Color.gray.opacity(0.1))
@@ -565,139 +801,115 @@ struct NoRemindersPlaceholderView: View {
     }
 }
 
-// MARK: - RemindersScreen (Second Tab Content)
+// MARK: - RemindersMainContentView
+struct RemindersMainContentView: View {
+    @EnvironmentObject var authManager: AuthManager
+    var activeMedicines: [Medicine]
+    var activeReminders: [Reminder]
+    var activeRemindersCount: Int
+    var overdueRemindersCount: Int
+    var onTrackPercentage: Int
+    var onToggleActive: (UUID, Reminder.ReminderType) -> Void
+    var onDelete: (UUID, Reminder.ReminderType) -> Void
+    var onEdit: (Reminder) -> Void
+    var onToggleTimeSlotCompletion: (UUID, Date, Reminder.ReminderType) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            RemindersIntroHeader()
+            
+            SMAMedicineTrackerStats(medicinesCount: activeMedicines.count)
+            
+            RemindersSummarySection(
+                activeRemindersCount: activeRemindersCount,
+                overdueRemindersCount: overdueRemindersCount,
+                onTrackPercentage: onTrackPercentage
+            )
+
+            SectionHeaderView(title: "All Reminders")
+
+            AllRemindersList(
+                displayedReminders: activeReminders,
+                onToggleActive: onToggleActive,
+                onDelete: onDelete,
+                onEdit: onEdit,
+                onToggleTimeSlotCompletion: onToggleTimeSlotCompletion
+            )
+            .padding(.bottom, 20)
+        }
+    }
+}
+
+// MARK: - RemindersScreen
 struct RemindersScreen: View {
-    let medicinesCount: Int // This property is passed from MedicineTracker
-    @Binding var reminders: [Reminder]
+    @Query(filter: #Predicate<Medicine> { $0.isActive == true && $0.userSettings?.userID != nil })
+    private var activeMedicines: [Medicine]
+    
+    @Query(sort: \Reminder.nextDue)
+    private var reminders: [Reminder]
+    
+    @Environment(\.modelContext) private var modelContext
+    @EnvironmentObject var authManager: AuthManager
     @State private var showingAddReminderSheet = false
-    @State private var reminderToEdit: Reminder? // For editing existing reminders
-    @State private var refreshID = UUID() // To force redraws if SwiftUI misses something
+    @State private var reminderToEdit: Reminder?
+    @State private var showNoContactsAlert = false
+    @State private var queryRefreshTrigger = false
+    @StateObject private var missedReminderService: MissedReminderService
+
+    init() {
+        _missedReminderService = StateObject(wrappedValue: MissedReminderService(authManager: AuthManager()))
+    }
 
     private var activeRemindersCount: Int {
-        reminders.filter { $0.active && !$0.hasPeriodEnded && !$0.isFutureReminder }.count
+        reminders.filter {
+            $0.userSettings?.userID == authManager.currentUserUID &&
+            $0.active && !$0.hasPeriodEnded && !$0.isFutureReminder
+        }.count
     }
 
     private var overdueRemindersCount: Int {
-        reminders.filter { $0.active && $0.isOverdue && !$0.isCompletedForAllTimesToday }.count
+        reminders.filter {
+            $0.userSettings?.userID == authManager.currentUserUID &&
+            $0.active && $0.isOverdue && !$0.isCompletedForAllTimesToday
+        }.count
     }
 
     private var onTrackPercentage: Int {
-        guard activeRemindersCount > 0 else { return 100 }
-        // On track means not overdue for any time slot
-        let completedOrNotOverdueCount = reminders.filter {
+        let userFilteredReminders = reminders.filter { $0.userSettings?.userID == authManager.currentUserUID }
+        guard userFilteredReminders.count > 0 else { return 100 }
+        let onTrackUserReminders = userFilteredReminders.filter {
             $0.active && !$0.hasPeriodEnded && !$0.isFutureReminder && !$0.isOverdue
         }.count
-        
-        return Int(round(Double(completedOrNotOverdueCount) / Double(activeRemindersCount) * 100))
+        return Int(round(Double(onTrackUserReminders) / Double(userFilteredReminders.count) * 100))
+    }
+
+    private var activeReminders: [Reminder] {
+        print("🔄 activeReminders computed property re-evaluating... queryRefreshTrigger: \(queryRefreshTrigger)")
+        let userFilteredReminders = reminders.filter { reminder in
+            reminder.userSettings?.userID == authManager.currentUserUID
+        }
+        let filtered = userFilteredReminders.filter { reminder in
+            !reminder.hasPeriodEnded && !reminder.isFutureReminder
+        }
+        let sorted = sortReminders(filteredReminders: filtered)
+        return sorted
     }
 
     var body: some View {
-        NavigationStack { // Provides its own navigation bar and full screen behavior
-            GeometryReader { geometry in // Use GeometryReader to get safe area insets
+        NavigationStack {
+            GeometryReader { geometry in
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
-                        // Reminders-specific subheading
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Manage your health checkup and medicine reminders") // Updated subheading
-                                .font(.subheadline)
-                                .foregroundColor(.gray.opacity(0.7))
-                        }
-                        .padding(.horizontal)
-                        .padding(.bottom, 10)
-                        
-                        // SMAMedicineTrackerStats is a generic header, keep it here
-                        // For the purpose of the Reminder Screen, we might want custom stats
-                        // but keeping the shared one for now as per previous structure.
-                        // You can replace this with Reminder-specific stats if needed.
-                        SMAMedicineTrackerStats(medicinesCount: medicinesCount)
-                        
-                        // Reminders Summary Stats Cards
-                        VStack(spacing: 12) { // Arranged vertically
-                            ReminderSummaryCard(
-                                title: "\(activeRemindersCount)", subtitle: "Active Reminders",
-                                iconName: "bell.fill", tintColor: .blue,
-                                gradientStart: .blue.opacity(0.05), gradientEnd: .blue.opacity(0.1)
-                            )
-                            ReminderSummaryCard(
-                                title: "\(overdueRemindersCount)", subtitle: "Overdue",
-                                iconName: "exclamationmark.triangle.fill", tintColor: .red,
-                                gradientStart: .red.opacity(0.05), gradientEnd: .red.opacity(0.1)
-                            )
-                            ReminderSummaryCard(
-                                title: "\(onTrackPercentage)%", subtitle: "On Track",
-                                iconName: "checkmark.circle.fill", tintColor: .green,
-                                gradientStart: .green.opacity(0.05), gradientEnd: .green.opacity(0.1)
-                            )
-                        }
-                        .padding(.horizontal)
-                        .padding(.vertical, 5)
-
-                        // All Reminders Section
-                        Text("All Reminders") // Updated section title
-                            .font(.title2)
-                            .fontWeight(.semibold)
-                            .padding(.top, 10)
-                            .padding(.horizontal)
-
-                        LazyVStack(spacing: 8) {
-                            if reminders.isEmpty {
-                                NoRemindersPlaceholderView()
-                                    .padding(.horizontal)
-                            } else {
-                                // Filter out ended reminders for display here
-                                ForEach(reminders.filter { !$0.hasPeriodEnded }.sorted(by: { $0.nextDue < $1.nextDue })) { reminder in // Iterate over value, not binding
-                                    // Find the binding for this specific reminder
-                                    if let index = reminders.firstIndex(where: { $0.id == reminder.id }) {
-                                        ReminderDetailRow(
-                                            reminder: $reminders[index], // Pass the specific binding
-                                            onToggleActive: { id in
-                                                if let reminderIndex = reminders.firstIndex(where: { $0.id == id }) {
-                                                    reminders[reminderIndex].active.toggle()
-                                                    reminders[reminderIndex].lastModifiedDate = Date()
-                                                    print("Toggled reminder \(reminders[reminderIndex].title) to active: \(reminders[reminderIndex].active)")
-                                                }
-                                            },
-                                            onDelete: { id in
-                                                // Perform the deletion with an animation block
-                                                withAnimation {
-                                                    reminders.removeAll(where: { $0.id == id })
-                                                    print("Deleted reminder: \(reminder.title)")
-                                                }
-                                                // No need for refreshID here; `withAnimation` and SwiftUI's diffing should handle it.
-                                            },
-                                            onEdit: { reminderToEdit in
-                                                if reminderToEdit.type == .checkup {
-                                                    self.reminderToEdit = reminderToEdit
-                                                    showingAddReminderSheet = true
-                                                } else {
-                                                    print("Editing not allowed for this reminder type.")
-                                                }
-                                            },
-                                            onToggleTimeSlotCompletion: { id, timeSlot in
-                                                if let reminderIndex = reminders.firstIndex(where: { $0.id == id }) {
-                                                    if reminders[reminderIndex].isTimeSlotCompleted(time: timeSlot) {
-                                                        reminders[reminderIndex].completedTimes.removeAll { completedDate in
-                                                            Calendar.current.isDate(completedDate, equalTo: timeSlot, toGranularity: .minute) &&
-                                                            Calendar.current.isDate(completedDate, inSameDayAs: Date())
-                                                        }
-                                                        print("Reopened time slot \(ReminderDetailRow.timeFormatter.string(from: timeSlot)) for reminder: \(reminders[reminderIndex].title)")
-                                                    } else {
-                                                        reminders[reminderIndex].completedTimes.append(timeSlot)
-                                                        print("Completed time slot \(ReminderDetailRow.timeFormatter.string(from: timeSlot)) for reminder: \(reminders[reminderIndex].title)")
-                                                    }
-                                                    reminders[reminderIndex].lastModifiedDate = Date()
-                                                }
-                                            }
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                        .padding(.bottom, 20)
-                        // Removed .id(refreshID) from LazyVStack, it's typically for when you change the *entire* list structure,
-                        // not for individual item additions/deletions/updates handled by ForEach's ID.
-                        // Let ForEach handle its own identity.
-                    }
+                    RemindersMainContentView(
+                        activeMedicines: activeMedicines,
+                        activeReminders: activeReminders,
+                        activeRemindersCount: activeRemindersCount,
+                        overdueRemindersCount: overdueRemindersCount,
+                        onTrackPercentage: onTrackPercentage,
+                        onToggleActive: handleToggleActive,
+                        onDelete: handleDelete,
+                        onEdit: handleEdit,
+                        onToggleTimeSlotCompletion: handleToggleTimeSlotCompletion
+                    )
                     .padding(.bottom, geometry.safeAreaInsets.bottom + 60)
                 }
             }
@@ -711,74 +923,431 @@ struct RemindersScreen: View {
                     }) {
                         Label("Add Reminder", systemImage: "plus")
                     }
+                    .accessibilityIdentifier("plusReminder")
                 }
             }
             .sheet(isPresented: $showingAddReminderSheet, onDismiss: {
-                // Ensure cleanup and reset logic runs after sheet dismissal
                 removeExpiredReminders()
                 resetCompletedRemindersForNewDay()
-                // Keep refreshID here, as adding/editing might change the order or count,
-                // and a full refresh might be desirable for the main list.
-                refreshID = UUID()
             }) {
                 AddNewReminderSheetView(reminderToEdit: $reminderToEdit) { savedReminder in
-                    if let index = reminders.firstIndex(where: { $0.id == savedReminder.id }) {
-                        reminders[index] = savedReminder
-                        print("Updated existing reminder: \(savedReminder.title)")
+                    print("Reminder saved/updated: \(savedReminder.title)")
+                    if savedReminder.active {
+                        scheduleNotifications(for: savedReminder)
                     } else {
-                        reminders.append(savedReminder)
-                        print("Added new reminder: \(savedReminder.title)")
+                        cancelNotifications(for: savedReminder)
                     }
-                    reminders.sort { $0.nextDue < $1.nextDue }
                 }
             }
-            .onAppear(perform: {
-                // Initial cleanup and reset when the view appears
+            .alert("Action Required", isPresented: $showNoContactsAlert) {
+                Button("OK") {
+                    // Navigate to settings screen or prompt user to add contacts/notifications
+                }
+            } message: {
+                Text("Please add emergency contacts in your profile or enable notifications to receive missed reminder reports.")
+            }
+            .onAppear {
+                UNUserNotificationCenter.current().getNotificationSettings { settings in
+                    if settings.authorizationStatus == .denied {
+                        print("🚫 Notification permission denied.")
+                        DispatchQueue.main.async {
+                            showNoContactsAlert = true
+                        }
+                    } else {
+                        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { success, error in
+                            if success {
+                                print("🔔 Notification authorization granted.")
+                                DispatchQueue.main.async {
+                                    let notificationDelegate = NotificationDelegate1(modelContext: modelContext)
+                                    UNUserNotificationCenter.current().delegate = notificationDelegate
+                                    missedReminderService.setModelContext(modelContext)
+                                    missedReminderService.scheduleDailyMissedReminderCheck()
+                                }
+                            } else if let error = error {
+                                print("🔔 Notification authorization error: \(error.localizedDescription)")
+                            }
+                        }
+                    }
+                }
                 removeExpiredReminders()
                 resetCompletedRemindersForNewDay()
-                // Keep refreshID here for the initial load
-                refreshID = UUID()
-            })
-        }
-    }
-    
-    // Function to remove reminders whose end date has passed
-    private func removeExpiredReminders() {
-        let initialCount = reminders.count
-        reminders.removeAll { reminder in
-            let shouldRemove = reminder.hasPeriodEnded
-            if shouldRemove {
-                print("Removed expired reminder: \(reminder.title)")
             }
-            return shouldRemove
-        }
-        if reminders.count != initialCount {
-            // A change in count means a visual change, so a refresh here is appropriate.
-            refreshID = UUID()
-            print("Expired reminders cleaned up. Count changed from \(initialCount) to \(reminders.count)")
+            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("NoEmergencyContacts"))) { _ in
+                showNoContactsAlert = true
+            }
+            .onReceive(authManager.$currentUserUID) { _ in
+                queryRefreshTrigger.toggle()
+            }
+            .environmentObject(missedReminderService)
         }
     }
 
-    // New function to reset completed times for reminders at the start of a new day
+    private func handleToggleActive(id: UUID, type: Reminder.ReminderType) {
+        if type == .checkup {
+            if let reminderToUpdate = reminders.first(where: { $0.id == id && $0.userSettings?.userID == authManager.currentUserUID }) {
+                print("Toggled checkup reminder \(reminderToUpdate.title) to active: \(reminderToUpdate.active)")
+                if reminderToUpdate.active {
+                    scheduleNotifications(for: reminderToUpdate)
+                } else {
+                    cancelNotifications(for: reminderToUpdate)
+                }
+            }
+        }
+    }
+
+    private func handleDelete(id: UUID, type: Reminder.ReminderType) {
+        withAnimation {
+            if type == .checkup {
+                if let reminderToDelete = reminders.first(where: { $0.id == id && $0.userSettings?.userID == authManager.currentUserUID }) {
+                    cancelNotifications(for: reminderToDelete)
+                    modelContext.delete(reminderToDelete)
+                    print("Deleted checkup reminder: \(reminderToDelete.title)")
+                }
+            }
+        }
+    }
+
+    private func handleEdit(reminderToEdit: Reminder) {
+        if reminderToEdit.type == .checkup {
+            self.reminderToEdit = reminderToEdit
+            showingAddReminderSheet = true
+        } else {
+            print("Editing not allowed for medicine reminders directly from here.")
+        }
+    }
+
+    private func handleToggleTimeSlotCompletion(id: UUID, timeSlot: Date, type: Reminder.ReminderType) {
+        let calendar = Calendar.current
+        if type == .checkup {
+            if let reminderToUpdate = reminders.first(where: { $0.id == id && $0.userSettings?.userID == authManager.currentUserUID }) {
+                if reminderToUpdate.isTimeSlotCompleted(time: timeSlot, forDate: Date()) {
+                    reminderToUpdate.completedTimes.removeAll { completedDate in
+                        calendar.isDate(completedDate, equalTo: timeSlot, toGranularity: .minute) &&
+                            calendar.isDate(completedDate, inSameDayAs: Date())
+                    }
+                    print("Reopened checkup time slot \(ReminderDetailRow.timeFormatter.string(from: timeSlot)) for reminder: \(reminderToUpdate.title)")
+                } else {
+                    reminderToUpdate.completedTimes.append(calendar.date(bySettingHour: calendar.component(.hour, from: timeSlot), minute: calendar.component(.minute, from: timeSlot), second: 0, of: Date())!)
+                    print("Completed checkup time slot \(ReminderDetailRow.timeFormatter.string(from: timeSlot)) for reminder: \(reminderToUpdate.title)")
+                }
+                reminderToUpdate.lastModifiedDate = Date()
+            }
+        }
+    }
+
+    private func removeExpiredReminders() {
+        let initialCount = reminders.count
+        reminders.filter { $0.hasPeriodEnded && $0.userSettings?.userID == authManager.currentUserUID }.forEach { expiredReminder in
+            cancelNotifications(for: expiredReminder)
+            modelContext.delete(expiredReminder)
+            print("Removed expired checkup reminder: \(expiredReminder.title)")
+        }
+        if reminders.count != initialCount {
+            print("Expired checkup reminders cleaned up. Count changed from \(initialCount) to \(reminders.count)")
+        }
+    }
+
     private func resetCompletedRemindersForNewDay() {
         let calendar = Calendar.current
         var changed = false
-        for i in reminders.indices {
-            if let lastReset = reminders[i].lastResetDate, calendar.isDateInToday(lastReset) {
+        for reminder in reminders where reminder.active && reminder.userSettings?.userID == authManager.currentUserUID {
+            if let lastReset = reminder.lastResetDate, calendar.isDateInToday(lastReset) {
                 continue
             }
-            
-            if !reminders[i].completedTimes.isEmpty {
-                 reminders[i].completedTimes = []
-                 reminders[i].lastModifiedDate = Date()
-                 changed = true
-                 print("Reset completed times for reminder: \(reminders[i].title) for a new day.")
+            if !reminder.completedTimes.isEmpty {
+                reminder.completedTimes = []
+                reminder.lastModifiedDate = Date()
+                changed = true
+                print("Reset completed times for checkup reminder: \(reminder.title) for a new day.")
             }
-            reminders[i].lastResetDate = Date()
+            reminder.lastResetDate = Date()
         }
         if changed {
-            // A change means a visual change, so a refresh here is appropriate.
-            refreshID = UUID()
+            print("Checkup reminders reset for new day.")
+        }
+    }
+
+    private func scheduleNotifications(for reminder: Reminder) {
+        print("🔔 scheduleNotifications called for reminder: \(reminder.title)")
+        guard reminder.active && reminder.type == .checkup && reminder.userSettings?.userID == authManager.currentUserUID else {
+            print("🔔 Notification not scheduled for \(reminder.title): Not active, not a checkup reminder, or not for current user.")
+            return
+        }
+
+        let center = UNUserNotificationCenter.current()
+        let calendar = Calendar.current
+        var identifiersToCancel: [String] = []
+        for time in reminder.times {
+            identifiersToCancel.append("\(reminder.id.uuidString)-\(ReminderDetailRow.timeFormatter.string(from: time))")
+        }
+        center.removePendingNotificationRequests(withIdentifiers: identifiersToCancel)
+        print("🔔 Cleared existing notifications for \(reminder.title) with identifiers: \(identifiersToCancel)")
+
+        for time in reminder.times {
+            let content = UNMutableNotificationContent()
+            content.title = reminder.title
+            content.body = "It's time for your \(reminder.type.displayName)!"
+            content.sound = .default
+            var dateComponents = calendar.dateComponents([.hour, .minute], from: time)
+            let trigger = UNCalendarNotificationTrigger(dateMatching: dateComponents, repeats: true)
+            let requestIdentifier = "\(reminder.id.uuidString)-\(ReminderDetailRow.timeFormatter.string(from: time))"
+            let request = UNNotificationRequest(identifier: requestIdentifier, content: content, trigger: trigger)
+            center.add(request) { error in
+                if let error = error {
+                    print("🔔 Error scheduling notification for \(reminder.title) at \(ReminderDetailRow.timeFormatter.string(from: time)): \(error.localizedDescription)")
+                } else {
+                    print("🔔 Successfully scheduled notification for \(reminder.title) at \(ReminderDetailRow.timeFormatter.string(from: time)) (ID: \(requestIdentifier))")
+                }
+            }
+        }
+    }
+
+    private func cancelNotifications(for reminder: Reminder) {
+        let center = UNUserNotificationCenter.current()
+        var identifiersToCancel: [String] = []
+        for time in reminder.times {
+            let requestIdentifier = "\(reminder.id.uuidString)-\(ReminderDetailRow.timeFormatter.string(from: time))"
+            identifiersToCancel.append(requestIdentifier)
+        }
+        center.removePendingNotificationRequests(withIdentifiers: identifiersToCancel)
+        print("🔔 Cancelled notifications for reminder: \(reminder.title) (IDs: \(identifiersToCancel.joined(separator: ", ")))")
+    }
+
+    private func sortReminders(filteredReminders: [Reminder]) -> [Reminder] {
+        return filteredReminders.sorted { (rem1, rem2) in
+            if rem1.isOverdue && !rem2.isOverdue {
+                return true
+            }
+            if !rem1.isOverdue && rem2.isOverdue {
+                return false
+            }
+            if rem1.isFutureReminder && !rem2.isFutureReminder {
+                return false
+            }
+            if !rem1.isFutureReminder && rem2.isFutureReminder {
+                return true
+            }
+            if rem1.nextDue != rem2.nextDue {
+                return rem1.nextDue < rem2.nextDue
+            }
+            if !rem1.isCompletedForAllTimesToday && rem2.isCompletedForAllTimesToday {
+                return true
+            }
+            if rem1.isCompletedForAllTimesToday && !rem2.isCompletedForAllTimesToday {
+                return false
+            }
+            return rem1.title < rem2.title
         }
     }
 }
+
+// MARK: - Extracted Sub-views for RemindersScreen
+
+// MARK: - Extracted Sub-views
+struct RemindersIntroHeader: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Manage your health checkup and medicine reminders")
+                .font(.subheadline)
+                .foregroundColor(.gray.opacity(0.7))
+        }
+        .padding(.horizontal)
+        .padding(.bottom, 10)
+    }
+}
+
+struct RemindersSummarySection: View {
+    let activeRemindersCount: Int
+    let overdueRemindersCount: Int
+    let onTrackPercentage: Int
+
+    var body: some View {
+        VStack(spacing: 12) {
+            ReminderSummaryCard(
+                title: "\(activeRemindersCount)", subtitle: "Active Reminders",
+                iconName: "bell.fill", tintColor: .blue,
+                gradientStart: .blue.opacity(0.05), gradientEnd: .blue.opacity(0.1)
+            )
+            ReminderSummaryCard(
+                title: "\(overdueRemindersCount)", subtitle: "Overdue",
+                iconName: "exclamationmark.triangle.fill", tintColor: .red,
+                gradientStart: .red.opacity(0.05), gradientEnd: .red.opacity(0.1)
+            )
+            ReminderSummaryCard(
+                title: "\(onTrackPercentage)%", subtitle: "On Track",
+                iconName: "checkmark.circle.fill", tintColor: .green,
+                gradientStart: .green.opacity(0.05), gradientEnd: .green.opacity(0.1)
+            )
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 5)
+    }
+}
+
+struct SectionHeaderView: View {
+    let title: String
+    var body: some View {
+        Text(title)
+            .font(.title2)
+            .fontWeight(.semibold)
+            .padding(.top, 10)
+            .padding(.horizontal)
+    }
+}
+
+struct AllRemindersList: View {
+    let displayedReminders: [Reminder]
+    @EnvironmentObject var authManager: AuthManager
+    var onToggleActive: (UUID, Reminder.ReminderType) -> Void
+    var onDelete: (UUID, Reminder.ReminderType) -> Void
+    var onEdit: (Reminder) -> Void
+    var onToggleTimeSlotCompletion: (UUID, Date, Reminder.ReminderType) -> Void
+
+    var body: some View {
+        LazyVStack(spacing: 8) {
+            if displayedReminders.isEmpty {
+                NoRemindersPlaceholderView()
+                    .padding(.horizontal)
+            } else {
+                ForEach(displayedReminders) { reminder in
+                    ReminderDetailRow(
+                        reminder: reminder,
+                        onToggleActive: onToggleActive,
+                        onDelete: onDelete,
+                        onEdit: onEdit,
+                        onToggleTimeSlotCompletion: onToggleTimeSlotCompletion
+                    )
+                }
+            }
+        }
+    }
+}
+
+
+extension Reminder {
+    /// Resets `completedTimes` if the last reset was not today.
+    /// This should be called typically once per day (e.g., on app launch or a background task).
+    func resetCompletedTimesIfNeeded() {
+        let calendar = Calendar.current
+        let today = Date()
+
+        if let lastReset = lastResetDate {
+            if !calendar.isDate(lastReset, inSameDayAs: today) {
+                // It's a new day, reset completed times
+                completedTimes = []
+                lastResetDate = today
+                // Important: Ensure you save the model context after this change
+            }
+        } else {
+            // First time running or no reset date set, initialize it
+            completedTimes = []
+            lastResetDate = today
+            // Important: Ensure you save the model context after this change
+        }
+    }
+
+    /// Calculates the adherence for this reminder for a specific day.
+    /// - Parameter day: The date for which to calculate adherence.
+    /// - Returns: A Double representing the adherence percentage (0.0 to 1.0), or nil if not applicable.
+    func calculateDailyAdherence(for day: Date) -> Double? {
+            let calendar = Calendar.current
+            let startOfDay = calendar.startOfDay(for: day)
+            let endOfDay = calendar.date(bySettingHour: 23, minute: 59, second: 59, of: day) ?? day
+
+            // If reminder is not active, or its period doesn't cover this day, no adherence
+            guard active && !hasPeriodEnded && !isFutureReminder else { return nil }
+            
+            let normalizedStartDate = calendar.startOfDay(for: startDate)
+            let normalizedEndDate = calendar.startOfDay(for: endDate)
+
+            if !(startOfDay >= normalizedStartDate && startOfDay <= normalizedEndDate) {
+                return nil // Reminder is not active for this specific day
+            }
+
+            guard !times.isEmpty else { return 0.0 } // If no times, 100% adherence (or define as N/A)
+
+            var completedSlotsOnDay = 0
+            var totalDueSlotsOnDay = 0
+
+            for timeSlot in times {
+                let timeComponents = calendar.dateComponents([.hour, .minute, .second], from: timeSlot)
+                guard let scheduledTimeForDay = calendar.date(bySettingHour: timeComponents.hour ?? 0,
+                                                              minute: timeComponents.minute ?? 0,
+                                                              second: timeComponents.second ?? 0,
+                                                              of: day) else { continue }
+                
+                // Only count slots that were actually due by the reference point (end of day or now)
+                let referenceDate = calendar.isDateInToday(day) ? Date() : endOfDay
+
+                if scheduledTimeForDay <= referenceDate {
+                    totalDueSlotsOnDay += 1
+                    if isTimeSlotCompleted(time: scheduledTimeForDay, forDate: day) { // Pass 'day' here
+                        completedSlotsOnDay += 1
+                    }
+                }
+            }
+            
+            guard totalDueSlotsOnDay > 0 else { return 0.0 } // No slots due, technically 100% adherence (or N/A)
+            return Double(completedSlotsOnDay) / Double(totalDueSlotsOnDay)
+        }
+
+    /// Calculates the adherence for this reminder over a given date range.
+    /// - Parameters:
+    ///   - fromDate: The beginning of the date range (inclusive).
+    ///   - toDate: The end of the date range (inclusive).
+    /// - Returns: A Double representing the average adherence percentage, or nil if no days were applicable.
+    func calculateAdherence(from fromDate: Date, to toDate: Date) -> Double? {
+        let calendar = Calendar.current
+        var totalAdherence: Double = 0.0
+        var applicableDays = 0
+
+        var currentDate = calendar.startOfDay(for: fromDate)
+        let endRangeDate = calendar.startOfDay(for: toDate)
+
+        while currentDate <= endRangeDate {
+            if let dailyAdherence = calculateDailyAdherence(for: currentDate) {
+                totalAdherence += dailyAdherence
+                applicableDays += 1
+            }
+            guard let nextDay = calendar.date(byAdding: .day, value: 1, to: currentDate) else { break }
+            currentDate = nextDay
+        }
+
+        guard applicableDays > 0 else { return nil }
+        return totalAdherence / Double(applicableDays)
+    }
+}
+
+// NOTE: Your `isTimeSlotCompleted` function in the `Reminder` model
+// currently checks `inSameDayAs: Date()`. For `calculateDailyAdherence(for day: Date)`,
+// you'll need to modify `isTimeSlotCompleted` to accept the `day` parameter
+// so it can check against that specific day instead of always `Date()`.
+//
+// Updated `isTimeSlotCompleted` (within the Reminder class):
+/*
+func isTimeSlotCompleted(time: Date) -> Bool { // Original function, can be overloaded
+    let calendar = Calendar.current
+    let timeComponents = calendar.dateComponents([.hour, .minute], from: time)
+
+    return completedTimes.contains { completedDate in
+        let completedComponents = calendar.dateComponents([.hour, .minute], from: completedDate)
+        return completedComponents.hour == timeComponents.hour &&
+                completedComponents.minute == timeComponents.minute &&
+                calendar.isDate(completedDate, inSameDayAs: Date()) // Sirf aaj ke din ke liye check karein
+    }
+}
+
+// NEW OVERLOAD to handle checking for a specific day:
+func isTimeSlotCompleted(time: Date, for specificDay: Date) -> Bool {
+    let calendar = Calendar.current
+    let timeComponents = calendar.dateComponents([.hour, .minute], from: time)
+
+    return completedTimes.contains { completedDate in
+        let completedComponents = calendar.dateComponents([.hour, .minute], from: completedDate)
+        return completedComponents.hour == timeComponents.hour &&
+                completedComponents.minute == timeComponents.minute &&
+                calendar.isDate(completedDate, inSameDayAs: specificDay) // Check for specific day
+    }
+}
+*/
+// And then in `calculateDailyAdherence`, call `isTimeSlotCompleted(time: scheduledTimeForDay, for: day)`.

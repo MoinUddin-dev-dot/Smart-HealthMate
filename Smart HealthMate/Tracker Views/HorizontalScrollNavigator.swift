@@ -10,6 +10,7 @@ import SwiftUI
 struct HorizontalScrollNavigator: View {
     let panels: [PanelType] = PanelType.allCases
     @Binding var activePanel: PanelType
+    @EnvironmentObject var authManager: AuthManager
 
     var body: some View {
         GeometryReader { geo in
@@ -33,6 +34,7 @@ struct HorizontalScrollNavigator: View {
                             }
                             .frame(minWidth: 60)
                         }
+                        .accessibilityIdentifier(panel.accessibilityID) // Add accessibility identifier
                     }
                 }
                 .frame(minWidth: geo.size.width, alignment: .center) // <– THIS centers the content

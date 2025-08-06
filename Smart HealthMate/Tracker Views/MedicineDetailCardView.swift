@@ -8,23 +8,31 @@
 import SwiftUI
 import SwiftData
 
+import SwiftUI
+import SwiftData
+
+
+//
+//  MedicineDetailCardView.swift
+//  Smart HealthMate
+//
+//  Created by Moin on 6/18/25.
+import SwiftUI
+import SwiftData
+
 struct MedicineDetailCardView: View {
-    // ⚠️ IMPORTANT CHANGE: Use @Bindable for direct property modification and SwiftData tracking
     @Bindable var medicine: Medicine
+    @Environment(\.modelContext) private var modelContext
 
-    // Closures for actions related to the entire Medicine object (edit, delete)
-    // These still notify the parent view (e.g., MedicineListView) to perform context operations.
-    var onEdit: ((_ medicine: Medicine) -> Void)?
-    var onDelete: ((_ medicineId: UUID) -> Void)?
+    var onEdit: ((Medicine) -> Void)?
+    var onDelete: ((UUID) -> Void)?
 
-    // Formatter for short time display (e.g., "8:00 AM")
-    private static let timeFormatter: DateFormatter = {
+     static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.timeStyle = .short
         return formatter
     }()
 
-    // Formatter for date display (e.g., "Jul 1, 2025")
     private static let itemFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
@@ -37,10 +45,9 @@ struct MedicineDetailCardView: View {
             Rectangle()
                 .fill(medicine.isActive ? Color.blue : Color.gray)
                 .frame(width: 6)
-                .clipShapeWithRoundedCorners(12, corners: [.topLeft, .bottomLeft])
+                .clipShape(RoundedRectangle(cornerRadius: 12))
 
             VStack(alignment: .leading, spacing: 10) {
-                // MARK: Header Section
                 HStack(alignment: .top) {
                     Image(systemName: "pill.fill")
                         .font(.title2)
@@ -62,17 +69,8 @@ struct MedicineDetailCardView: View {
 
                     Spacer()
 
-                    // Missed dose indicator - This will be calculated in the Medicine Model or parent
-                    // if medicine.hasMissedDoseToday {
-                    //     Image(systemName: "exclamationmark.triangle.fill")
-                    //         .foregroundColor(.red)
-                    //         .font(.headline)
-                    //         .accessibilityLabel("Missed dose today")
-                    // }
-
-                    // Edit Button
                     Button(action: {
-                        onEdit?(medicine) // Pass the @Bindable medicine object
+                        onEdit?(medicine)
                     }) {
                         Image(systemName: "pencil.circle.fill")
                             .foregroundColor(.blue)
@@ -80,9 +78,8 @@ struct MedicineDetailCardView: View {
                     }
                     .padding(.trailing, 5)
 
-                    // Delete Button (still using callback to delete the entire medicine)
                     Button(action: {
-                        onDelete?(medicine.id) // Pass the Medicine ID
+                        onDelete?(medicine.id)
                     }) {
                         Image(systemName: "trash.fill")
                             .foregroundColor(.red)
@@ -91,7 +88,6 @@ struct MedicineDetailCardView: View {
                 }
                 .padding(.bottom, 5)
 
-                // Purpose Tag
                 Text(medicine.purpose)
                     .font(.footnote)
                     .padding(.horizontal, 8)
@@ -99,12 +95,11 @@ struct MedicineDetailCardView: View {
                     .background(Color.gray.opacity(0.1))
                     .cornerRadius(5)
 
-                // Period and Frequency Details
                 HStack(spacing: 5) {
                     Image(systemName: "calendar")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    Text("Period: \(medicine.startDate, formatter: MedicineDetailCardView.itemFormatter) - \(medicine.endDate, formatter: MedicineDetailCardView.itemFormatter)")
+                    Text("Period: \(medicine.startDate, formatter: Self.itemFormatter) - \(medicine.endDate, formatter: Self.itemFormatter)")
                         .font(.caption)
                         .foregroundColor(.secondary)
                     Spacer()
@@ -117,7 +112,6 @@ struct MedicineDetailCardView: View {
                 }
                 .padding(.bottom, 5)
 
-                // Status Pill (Active/Inactive)
                 HStack {
                     if medicine.isActive {
                         Text("Active")
@@ -126,7 +120,7 @@ struct MedicineDetailCardView: View {
                             .padding(.horizontal, 6)
                             .padding(.vertical, 3)
                             .background(Color.green.opacity(0.2))
-                            .foregroundColor(.green.darker())
+                            .foregroundColor(.green)
                             .cornerRadius(5)
                     } else {
                         Text("Inactive")
@@ -135,87 +129,51 @@ struct MedicineDetailCardView: View {
                             .padding(.horizontal, 6)
                             .padding(.vertical, 3)
                             .background(Color.red.opacity(0.2))
-                            .foregroundColor(.red.darker())
+                            .foregroundColor(.red)
                             .cornerRadius(5)
                     }
                     if !medicine.isActive, let inactiveDate = medicine.inactiveDate {
-                        Text("Since: \(inactiveDate, formatter: MedicineDetailCardView.itemFormatter)")
+                        Text("Since: \(inactiveDate, formatter: Self.itemFormatter)")
                             .font(.caption2)
                             .foregroundColor(.gray)
                     } else if !medicine.isActive && medicine.startDate > Date() {
-                        Text("Starts: \(medicine.startDate, formatter: MedicineDetailCardView.itemFormatter)")
+                        Text("Starts: \(medicine.startDate, formatter: Self.itemFormatter)")
                             .font(.caption2)
                             .foregroundColor(.orange)
                     }
                 }
                 .padding(.bottom, 5)
 
-                // MARK: Scheduled Doses Section
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Scheduled Doses:")
                         .font(.caption)
                         .fontWeight(.semibold)
                         .foregroundColor(.secondary)
 
-                    // Ensure scheduledDoses is not nil and sort for display
                     if let sortedDoses = medicine.scheduledDoses?.sorted(by: { $0.time < $1.time }) {
-                        ForEach(sortedDoses) { dose in
+                        ForEach(sortedDoses) { scheduledDose in
                             HStack {
-                                Text(dose.time, style: .time)
+                                Text(scheduledDose.time, formatter: Self.timeFormatter)
                                     .font(.subheadline)
-                                    // Use dose.isTaken and dose.isPending directly from ScheduledDose model
-                                    .foregroundColor(dose.isTaken ? .primary : (dose.isPending ? .primary : .red))
+                                    .foregroundColor(getDoseStatusToday(for: scheduledDose).color)
 
                                 Spacer()
 
-                                // Display status text and icon based on dose properties
-                                if dose.isTaken {
-                                    HStack(spacing: 5) {
-                                        Image(systemName: "checkmark.circle.fill")
-                                            .foregroundColor(.green)
-                                            .font(.subheadline)
-                                        Text("Taken")
-                                            .font(.subheadline)
-                                            .foregroundColor(.green)
-                                    }
-                                } else if dose.isPending {
-                                    HStack(spacing: 5) {
-                                        Image(systemName: "hourglass")
-                                            .foregroundColor(.orange)
-                                            .font(.subheadline)
-                                        Text("Pending")
-                                            .font(.subheadline)
-                                            .foregroundColor(.orange)
-                                    }
-                                } else { // Dose not taken and not pending, so it's missed
-                                    HStack(spacing: 5) {
-                                        Image(systemName: "xmark.circle.fill")
-                                            .foregroundColor(.red)
-                                            .font(.subheadline)
-                                        Text("Missed")
-                                            .font(.subheadline)
-                                            .foregroundColor(.red)
-                                    }
-                                }
+                                getDoseStatusToday(for: scheduledDose).view
 
-                                // Mark Taken/Untake Button
                                 Button(action: {
-                                    // ⚠️ IMPORTANT CHANGE: Directly toggle isTaken on the @Bindable dose object.
-                                    // SwiftData automatically saves this change.
-                                    dose.isTaken.toggle()
-                                    // No need to call 'onTakenStatusChanged' closure here anymore,
-                                    // as the change is applied directly to the managed object.
+                                    toggleDoseStatus(for: scheduledDose)
                                 }) {
-                                    Text(dose.isTaken ? "Untake" : "Mark Taken")
+                                    Text(isDoseTakenToday(for: scheduledDose) ? "Untake" : "Mark Taken")
                                         .font(.caption)
                                         .foregroundColor(.white)
                                         .padding(.horizontal, 10)
                                         .padding(.vertical, 5)
-                                        .background(dose.isTaken ? Color.orange : Color.blue)
+                                        .background(isDoseTakenToday(for: scheduledDose) ? Color.orange : Color.blue)
                                         .cornerRadius(6)
                                 }
-                                // Disable if the dose time has not yet arrived
-                                .disabled(dose.isPending)
+                                .accessibilityIdentifier("taken")
+                                .disabled(scheduledDose.isPending && !isDoseTakenToday(for: scheduledDose))
                             }
                         }
                     } else {
@@ -232,9 +190,105 @@ struct MedicineDetailCardView: View {
         .cornerRadius(12)
         .shadow(color: Color.black.opacity(0.1), radius: 5, x: 0, y: 2)
     }
+
+    private func isDoseTakenToday(for scheduledDose: ScheduledDose) -> Bool {
+        let calendar = Calendar.current
+        let todayStartOfDay = calendar.startOfDay(for: Date())
+        
+        return medicine.doseLogEvents?.contains(where: { event in
+            calendar.isDate(event.dateRecorded, inSameDayAs: todayStartOfDay) &&
+            event.scheduledDose?.id == scheduledDose.id &&
+            event.isTaken
+        }) ?? false
+    }
+
+    private func getDoseStatusToday(for scheduledDose: ScheduledDose) -> (color: Color, view: some View) {
+        let calendar = Calendar.current
+        let today = Date()
+        let todayStartOfDay = calendar.startOfDay(for: today)
+        let components = calendar.dateComponents([.hour, .minute], from: scheduledDose.time)
+        guard let doseTimeToday = calendar.date(bySettingHour: components.hour!,
+                                                minute: components.minute!,
+                                                second: 0,
+                                                of: today) else {
+            return (.gray, HStack(spacing: 5) {
+                Image(systemName: "questionmark.circle.fill")
+                    .foregroundStyle(.gray)
+                Text("Unknown")
+                    .foregroundStyle(.gray)
+            })
+        }
+
+        if scheduledDose.isPending {
+            return (
+                .primary,
+                HStack(spacing: 5) {
+                    Image(systemName: "hourglass")
+                        .foregroundStyle(.orange)
+                    Text("Pending")
+                        .foregroundStyle(.orange)
+                }
+            )
+        } else if isDoseTakenToday(for: scheduledDose) {
+            return (
+                .green,
+                HStack(spacing: 5) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    Text("Taken")
+                        .foregroundStyle(.green)
+                }
+            )
+        } else {
+            return (
+                .red,
+                HStack(spacing: 5) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.red)
+                    Text("Missed")
+                        .foregroundStyle(.red)
+                }
+            )
+        }
+    }
+
+    private func toggleDoseStatus(for scheduledDose: ScheduledDose) {
+        let calendar = Calendar.current
+        let today = Date()
+        let todayStartOfDay = calendar.startOfDay(for: today)
+
+        if let existingEvent = medicine.doseLogEvents?.first(where: { event in
+            calendar.isDate(event.dateRecorded, inSameDayAs: todayStartOfDay) && event.scheduledDose?.id == scheduledDose.id
+        }) {
+            existingEvent.isTaken.toggle()
+            existingEvent.timestamp = today
+            print("hqhq\(existingEvent.timestamp)")
+        } else {
+            let components = calendar.dateComponents([.hour, .minute], from: scheduledDose.time)
+            let doseTimeToday = calendar.date(bySettingHour: components.hour!, minute: components.minute!, second: 0, of: today) ?? today
+            let newEvent = DoseLogEvent(
+                id: UUID(),
+                timestamp: doseTimeToday,
+                isTaken: true,
+                scheduledDose: scheduledDose,
+                medicine: medicine,
+                dateRecorded: todayStartOfDay
+            )
+            newEvent.userSettings = medicine.userSettings
+            medicine.doseLogEvents = medicine.doseLogEvents ?? []
+            medicine.doseLogEvents?.append(newEvent)
+            modelContext.insert(newEvent)
+        }
+
+        do {
+            try modelContext.save()
+            NotificationCenter.default.post(name: .NSManagedObjectContextDidSave, object: modelContext)
+            print("✅ Toggled dose status for \(medicine.name) at \(Self.timeFormatter.string(from: scheduledDose.time)) to \(isDoseTakenToday(for: scheduledDose) ? "Taken" : "Not Taken")")
+        } catch {
+            print("⚠️ Error saving dose log event: \(error)")
+        }
+    }
 }
-
-
 
 // MARK: - Medicine Struct (Data model for MedicineListView)
 import Foundation
@@ -244,25 +298,34 @@ import SwiftUI // Only for Color.darker() example, remove if not needed here
 // Add Codable conformance for easy saving/loading (e.g., to UserDefaults or a database)
 
 // MARK: - Medicine Model
+// MARK: - Medicine Model
+import Foundation
+import SwiftUI // Only for Color.darker() example, remove if not needed here
+import SwiftData
+
 @Model
-final class Medicine: Equatable { // Equatable for comparison as requested
+final class Medicine: Equatable {
+    @Attribute(.unique) var id: UUID
+    var name: String
+    var purpose: String
+    var dosage: String
+    var startDate: Date
+    var endDate: Date
+    var isActive: Bool
+    var inactiveDate: Date?
+    var lastModifiedDate: Date
 
-    // 📦 Stored Properties
-    @Attribute(.unique) var id: UUID // Unique identifier for the medicine. Automatically Identifiable for SwiftData views.
-    var name: String // Medicine ka naam (e.g., "Panadol").
-    var purpose: String // Kis purpose ke liye hai (e.g., "Fever").
-    var dosage: String // Dosage detail (e.g., "500mg").
-    var timingString: String // Human-readable time string (e.g., "8:00 AM, 8:00 PM").
-    var startDate: Date // Kab se medicine lena start karna hai.
-    var endDate: Date // Kab tak lena hai.
-    var isActive: Bool // Abhi active hai ya nahi.
-    var inactiveDate: Date? // Kab inactive hua (agar hua toh).
-    var lastModifiedDate: Date // Last time kab edit/update hua tha.
+    var userSettings: UserSettings? // Assuming UserSettings model exists
 
-    // Relation to ScheduledDose.
+    // Relation to ScheduledDose (templates).
     // .cascade means if a Medicine is deleted, all its associated ScheduledDoses are also deleted.
     @Relationship(deleteRule: .cascade, inverse: \ScheduledDose.medicine)
-    var scheduledDoses: [ScheduledDose]? // List of all doses scheduled for this medicine.
+    var scheduledDoses: [ScheduledDose]? // List of all dose *templates* for this medicine.
+
+    // NEW Relation to DoseLogEvent.
+    // .cascade means if a Medicine is deleted, all its associated DoseLogEvents are also deleted.
+    @Relationship(deleteRule: .cascade, inverse: \DoseLogEvent.medicine)
+    var doseLogEvents: [DoseLogEvent]? // All actual dose log events (taken or missed) for this medicine
 
     // 🧠 Computed Properties
 
@@ -298,26 +361,34 @@ final class Medicine: Equatable { // Equatable for comparison as requested
         return normalizedEndDate < startOfToday
     }
 
-    /// Aaj koi dose reh gaya (missed + not taken) tou true.
+    /// Checks if any dose for today was missed (no corresponding DoseLogEvent by now marked as taken)
     var hasMissedDoseToday: Bool {
         let calendar = Calendar.current
         let now = Date()
+        let todayStartOfDay = calendar.startOfDay(for: now)
 
-        guard let doses = scheduledDoses else { return false } // Ensure doses array is not nil
+        guard let scheduledDoses = scheduledDoses else { return false }
 
-        for dose in doses {
-            // Get only hour and minute components from the scheduled dose time
-            let doseTimeComponents = calendar.dateComponents([.hour, .minute], from: dose.time)
+        for scheduledDose in scheduledDoses {
+            // Get the scheduled time for today
+            let doseTimeComponents = calendar.dateComponents([.hour, .minute], from: scheduledDose.time)
+            guard let scheduledDateTimeToday = calendar.date(bySettingHour: doseTimeComponents.hour!,
+                                                             minute: doseTimeComponents.minute!,
+                                                             second: 0,
+                                                             of: now) else { continue }
 
-            // Construct a date for today using the dose's hour and minute
-            guard let doseTimeOnToday = calendar.date(bySettingHour: doseTimeComponents.hour!,
-                                                      minute: doseTimeComponents.minute!,
-                                                      second: 0,
-                                                      of: now) else { continue }
+            // If the scheduled time has passed
+            if scheduledDateTimeToday < now {
+                // Check if a DoseLogEvent exists for this scheduledDose on today, marked as taken
+                let doseWasTakenToday = doseLogEvents?.contains(where: { event in
+                    calendar.isDate(event.dateRecorded, inSameDayAs: todayStartOfDay) &&
+                    event.scheduledDose?.id == scheduledDose.id &&
+                    event.isTaken == true
+                }) ?? false
 
-            // If the dose time on today has passed 'now' and the dose has not been taken
-            if calendar.compare(doseTimeOnToday, to: now, toGranularity: .minute) == .orderedAscending && !dose.isTaken {
-                return true // A missed dose is found
+                if !doseWasTakenToday {
+                    return true // Missed dose found for today (past due and not taken)
+                }
             }
         }
         return false // No missed doses found for today
@@ -325,8 +396,7 @@ final class Medicine: Equatable { // Equatable for comparison as requested
 
     /// "Once a day", "No specific times", or "X times a day".
     var displayTimingFrequency: String {
-        guard let doses = scheduledDoses else { return "No specific times" } // Ensure doses array is not nil
-
+        guard let doses = scheduledDoses else { return "No specific times" }
         if doses.isEmpty {
             return "No specific times"
         } else if doses.count == 1 {
@@ -343,7 +413,6 @@ final class Medicine: Equatable { // Equatable for comparison as requested
          name: String,
          purpose: String,
          dosage: String,
-         timingString: String,
          startDate: Date = Date(),
          endDate: Date,
          isActive: Bool = true,
@@ -354,7 +423,6 @@ final class Medicine: Equatable { // Equatable for comparison as requested
         self.name = name
         self.purpose = purpose
         self.dosage = dosage
-        self.timingString = timingString
         self.startDate = startDate
         self.endDate = endDate
         self.isActive = isActive
@@ -363,11 +431,11 @@ final class Medicine: Equatable { // Equatable for comparison as requested
         self.scheduledDoses = scheduledDoses
     }
 
-    /// Convenience initializer: Just use timingString, it auto-generates [ScheduledDose] using time parsing.
+    /// Convenience initializer: Now takes an array of Date for timings directly.
     convenience init(name: String,
                      purpose: String,
                      dosage: String,
-                     timingString: String,
+                     timings: [Date], // Changed from timingString to [Date]
                      startDate: Date = Date(),
                      endDate: Date,
                      isActive: Bool = true,
@@ -376,84 +444,60 @@ final class Medicine: Equatable { // Equatable for comparison as requested
                   name: name,
                   purpose: purpose,
                   dosage: dosage,
-                  timingString: timingString,
                   startDate: startDate,
                   endDate: endDate,
                   isActive: isActive,
                   inactiveDate: inactiveDate,
                   lastModifiedDate: Date()) // Set lastModifiedDate to now
 
-        // Auto-generate scheduledDoses from timingString
-        // ⚠️ FIX: Assign the result of the static function to self.scheduledDoses
-        self.scheduledDoses = Medicine.parseTimingStringToScheduledDoses(timingString: timingString, medicine: self)
+        // Create ScheduledDose objects from the provided Date array
+        self.scheduledDoses = timings.sorted().map { time in
+            let newDose = ScheduledDose(time: time)
+            newDose.medicine = self // Set the inverse relationship
+            return newDose
+        }
     }
 
     // Equatable conformance
     static func == (lhs: Medicine, rhs: Medicine) -> Bool {
         lhs.id == rhs.id
     }
-
-    // MARK: - Helper function for Medicine (parsing timingString)
-    // ⚠️ FIX: Move this function INSIDE the Medicine class and declare it as `static`
-    static func parseTimingStringToScheduledDoses(timingString: String, medicine: Medicine) -> [ScheduledDose] {
-        let components = timingString.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        var doses: [ScheduledDose] = []
-        let calendar = Calendar.current
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "h:mm a" // Example: "8:00 AM"
-
-        for component in components {
-            if let date = dateFormatter.date(from: String(component)) {
-                // Create a ScheduledDose with the parsed time
-                let newDose = ScheduledDose(time: date, isTaken: false)
-                newDose.medicine = medicine // Set the inverse relationship
-                doses.append(newDose)
-            } else {
-                // Handle cases where parsing fails (e.g., "morning", "after meals")
-                // For these, you might need a more complex parsing or a different property.
-                // For now, we'll just skip them if they don't match the time format.
-                print("Warning: Could not parse time from timingString component: \(component)")
-            }
-        }
-        return doses
-    }
 }
 
+// MARK: - ScheduledDose Model
 @Model
-final class ScheduledDose: Identifiable, Equatable { // Identifiable and Equatable as requested
-
-    // 📦 Stored Properties
-    @Attribute(.unique) var id: UUID // Unique ID per dose.
-    var time: Date // Kis time pe dose lena hai.
-    var isTaken: Bool // User ne dose le liya ya nahi (true/false).
+final class ScheduledDose: Identifiable, Equatable {
+    @Attribute(.unique) var id: UUID
+    var time: Date // The time this dose is scheduled for *each day*.
 
     // Inverse relationship to Medicine.
-    var medicine: Medicine? // Kis Medicine object se belong karta hai.
+    var medicine: Medicine? // Which Medicine object this dose template belongs to.
+
+    // NEW: Relation to DoseLogEvent. A ScheduledDose can have many DoseLogEvents over time.
+    @Relationship(deleteRule: .cascade, inverse: \DoseLogEvent.scheduledDose)
+    var doseLogEvents: [DoseLogEvent]? // Renamed from doseTakenEvents
 
     // 🧠 Computed Property
     /// Agar dose ka time abhi baaki hai (future mein), tou true.
     var isPending: Bool {
         let calendar = Calendar.current
         let now = Date()
-        
-        // Get only hour and minute for comparison today
+
+        // Get only hour and minute components from the scheduled dose time
         let doseTimeComponents = calendar.dateComponents([.hour, .minute], from: self.time)
         guard let doseTimeOnToday = calendar.date(bySettingHour: doseTimeComponents.hour!,
-                                                  minute: doseTimeComponents.minute!,
-                                                  second: 0,
-                                                  of: now) else { return false }
-        
+                                                 minute: doseTimeComponents.minute!,
+                                                 second: 0,
+                                                 of: now) else { return false }
+
         // A dose is pending if its time today is in the future relative to 'now'
         return calendar.compare(doseTimeOnToday, to: now, toGranularity: .minute) == .orderedDescending
     }
 
     // 🔧 Initializer
-    init(id: UUID = UUID(),
-         time: Date,
-         isTaken: Bool = false) {
+    init(id: UUID = UUID(), time: Date) {
         self.id = id
         self.time = time
-        self.isTaken = isTaken
     }
 
     // Equatable conformance
@@ -462,10 +506,242 @@ final class ScheduledDose: Identifiable, Equatable { // Identifiable and Equatab
     }
 }
 
+// MARK: - DoseLogEvent Model
+@Model
+final class DoseLogEvent: Identifiable, Equatable {
+    @Attribute(.unique) var id: UUID
+    var timestamp: Date          // The exact time the dose was taken OR the scheduled time if missed/pending.
+    var isTaken: Bool            // TRUE if dose was taken, FALSE if missed or pending.
+    var dateRecorded: Date       // The calendar day (start of day) this event pertains to. Useful for daily grouping.
+
+    
+    // Inverse relationships
+    var scheduledDose: ScheduledDose? // Which scheduled dose template this event is for.
+    var medicine: Medicine?           // Which medicine this event belongs to (for easier queries).
+    var userSettings: UserSettings? 
+
+    // Initializer
+    init(id: UUID = UUID(), timestamp: Date, isTaken: Bool, scheduledDose: ScheduledDose? = nil, medicine: Medicine? = nil, dateRecorded: Date) {
+        self.id = id
+        self.timestamp = timestamp
+        self.isTaken = isTaken
+        self.scheduledDose = scheduledDose
+        self.medicine = medicine
+        self.dateRecorded = dateRecorded // Store the start of the day
+    }
+
+    static func == (lhs: DoseLogEvent, rhs: DoseLogEvent) -> Bool {
+        lhs.id == rhs.id
+    }
+}
 
 
+// MARK: - Medicine Extension (for adherence and logging logic)
+import Foundation
+import SwiftData
 
-//#Preview {
-//    MedicineDetailCardView(medicine: Medicine(name: "Amlodipine", purpose: "Blood Pressure Control", dosage: "5mg", timingString: "9:00 AM, 9:00 PM"))
-//        .padding()
-//}
+extension Medicine {
+    // 🆕 Function to ensure all past-due doses for active period are logged.
+    // This should be called regularly, e.g., on app launch or when a medicine is viewed.
+    func ensureDoseLogEvents(in context: ModelContext) {
+        let calendar = Calendar.current
+        let now = Date()
+        let startOfToday = calendar.startOfDay(for: now)
+
+        guard self.isActive && self.isCurrentlyActiveBasedOnDates else { return } // Only process active medicines
+
+        guard let scheduledDoses = self.scheduledDoses, !scheduledDoses.isEmpty else { return }
+
+        // Calculate the maximum number of days to look back for logging missed doses
+        // Max 31 days to align with deletion policy
+        guard let thirtyOneDaysAgo = calendar.date(byAdding: .day, value: -30, to: startOfToday) else { return }
+
+        // Iterate from the medicine's start date (or 31 days ago, whichever is later) up to today
+        var currentDate = max(calendar.startOfDay(for: self.startDate), thirtyOneDaysAgo)
+
+        while currentDate <= startOfToday {
+            for scheduledDose in scheduledDoses {
+                let doseTimeComponents = calendar.dateComponents([.hour, .minute, .second], from: scheduledDose.time)
+                guard let scheduledDoseDateTime = calendar.date(bySettingHour: doseTimeComponents.hour ?? 0,
+                                                                 minute: doseTimeComponents.minute ?? 0,
+                                                                 second: doseTimeComponents.second ?? 0,
+                                                                 of: currentDate) else { continue }
+
+                // Determine the reference time for "past due"
+                let referenceTimeForDose = (calendar.isDateInToday(currentDate)) ? now : scheduledDoseDateTime.addingTimeInterval(1) // Just past the scheduled time if it's a past day
+
+                // Only log if the scheduled time has passed and the medicine was active on that day
+                if scheduledDoseDateTime < referenceTimeForDose {
+                    // Check if a DoseLogEvent already exists for this scheduledDose on this specific `currentDate`
+                    let existingLog = self.doseLogEvents?.first(where: { event in
+                        calendar.isDate(event.dateRecorded, inSameDayAs: currentDate) && event.scheduledDose?.id == scheduledDose.id
+                    })
+
+                    if existingLog == nil {
+                        // If no log exists, create a new DoseLogEvent marked as missed (isTaken: false)
+                        let missedLog = DoseLogEvent(timestamp: scheduledDoseDateTime, isTaken: false, scheduledDose: scheduledDose, medicine: self, dateRecorded: currentDate)
+                        context.insert(missedLog)
+                    }
+                }
+            }
+            guard let nextDay = calendar.date(byAdding: .day, value: 1, to: currentDate) else { break }
+            currentDate = nextDay
+        }
+    }
+
+    // 🆕 Function to delete DoseLogEvents older than 31 days
+    func deleteOldDoseLogEvents(in context: ModelContext) {
+        let calendar = Calendar.current
+        let now = Date()
+        guard let thirtyOneDaysAgo = calendar.date(byAdding: .day, value: -31, to: now) else { return }
+        let cutoffDate = calendar.startOfDay(for: thirtyOneDaysAgo) // Events for this day and before should be deleted
+
+        // Filter and delete events older than 31 days from today
+        self.doseLogEvents?
+            .filter { $0.dateRecorded < cutoffDate }
+            .forEach { oldEvent in
+                context.delete(oldEvent)
+            }
+    }
+
+    /// Calculates the adherence for this specific medicine over a given date range.
+    /// - Parameters:
+    ///   - startDate: The beginning of the date range (inclusive).
+    ///   - endDate: The end of the date range (inclusive).
+    /// - Returns: A Double representing the adherence percentage (0.0 to 1.0), or nil if no doses were due.
+    func calculateAdherence(from startDate: Date, to endDate: Date) -> Double? {
+        guard let scheduledDoses = scheduledDoses, !scheduledDoses.isEmpty else { return nil }
+        guard let doseLogEvents = doseLogEvents else { return nil } // Use doseLogEvents
+
+        let calendar = Calendar.current
+        let normalizedStartDate = calendar.startOfDay(for: startDate)
+        let normalizedEndDate = calendar.startOfDay(for: endDate)
+        let now = Date() // For checking if today's doses are past due
+
+        var dosesDue = 0
+        var dosesTaken = 0
+
+        // Iterate through each day in the range
+        var currentDate = normalizedStartDate
+        while currentDate <= normalizedEndDate {
+            // Check if the medicine itself was active on this specific date
+            let medicineStartsTodayOrBefore = calendar.compare(self.startDate, to: currentDate, toGranularity: .day) != .orderedDescending
+            let medicineEndsTodayOrAfter = calendar.compare(self.endDate, to: currentDate, toGranularity: .day) != .orderedAscending
+
+            if self.isActive && medicineStartsTodayOrBefore && medicineEndsTodayOrAfter {
+                for scheduledDose in scheduledDoses {
+                    // Create a full Date object for the scheduled dose on `currentDate`
+                    let doseTimeComponents = calendar.dateComponents([.hour, .minute, .second], from: scheduledDose.time)
+                    guard let scheduledDoseDateTime = calendar.date(bySettingHour: doseTimeComponents.hour ?? 0,
+                                                                     minute: doseTimeComponents.minute ?? 0,
+                                                                     second: doseTimeComponents.second ?? 0,
+                                                                     of: currentDate) else { continue }
+
+                    // Only count doses that were due by the end of 'currentDate'
+                    // or, if 'currentDate' is 'now', only count doses due up to 'now'
+                    let referenceDateForComparison = (calendar.isDateInToday(currentDate)) ? now : calendar.date(bySettingHour: 23, minute: 59, second: 59, of: currentDate) ?? currentDate
+
+                    if scheduledDoseDateTime <= referenceDateForComparison {
+                        dosesDue += 1
+                        // Check if a DoseLogEvent exists for this scheduledDose on this specific currentDate, marked as taken
+                        let wasTaken = doseLogEvents.contains { event in
+                            calendar.isDate(event.dateRecorded, inSameDayAs: currentDate) && event.scheduledDose?.id == scheduledDose.id && event.isTaken == true
+                        }
+                        if wasTaken {
+                            dosesTaken += 1
+                        }
+                    }
+                }
+            }
+            guard let nextDay = calendar.date(byAdding: .day, value: 1, to: currentDate) else { break }
+            currentDate = nextDay
+        }
+
+        guard dosesDue > 0 else { return nil } // Avoid division by zero if no doses were due
+        return Double(dosesTaken) / Double(dosesDue)
+    }
+
+    /// Calculates the daily adherence for this medicine.
+    /// - Returns: A Double representing the adherence percentage (0.0 to 1.0), or nil if no doses were due today.
+    var dailyAdherence: Double? {
+        let calendar = Calendar.current
+        let today = Date()
+        let todayStartOfDay = calendar.startOfDay(for: today)
+
+        // Check if the medicine is active and its period covers today
+        if !self.isActive || self.hasPeriodEnded() || self.isFutureMedicine {
+            return nil // Not applicable for today
+        }
+
+        guard let scheduledDoses = scheduledDoses, !scheduledDoses.isEmpty else { return nil }
+        guard let doseLogEvents = doseLogEvents else { return nil } // Use doseLogEvents
+
+        var dosesDueToday = 0
+        var dosesTakenToday = 0
+
+        for scheduledDose in scheduledDoses {
+            let doseTimeComponents = calendar.dateComponents([.hour, .minute, .second], from: scheduledDose.time)
+            guard let scheduledDoseDateTime = calendar.date(bySettingHour: doseTimeComponents.hour ?? 0,
+                                                             minute: doseTimeComponents.minute ?? 0,
+                                                             second: doseTimeComponents.second ?? 0,
+                                                             of: today) else { continue }
+
+            // Only count doses that were due by 'now'
+            if scheduledDoseDateTime <= today {
+                dosesDueToday += 1
+                // Check if a DoseLogEvent exists for this scheduledDose on today, marked as taken
+                let wasTaken = doseLogEvents.contains { event in
+                    calendar.isDate(event.dateRecorded, inSameDayAs: todayStartOfDay) && event.scheduledDose?.id == scheduledDose.id && event.isTaken == true
+                }
+                if wasTaken {
+                    dosesTakenToday += 1
+                }
+            }
+        }
+
+        guard dosesDueToday > 0 else { return nil }
+        return Double(dosesTakenToday) / Double(dosesDueToday)
+    }
+
+    func calculateWeeklyAdherence() -> Double? {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        guard let sevenDaysAgo = calendar.date(byAdding: .day, value: -6, to: today) else { return nil } // Today + 6 previous days = 7 days
+        return calculateAdherence(from: sevenDaysAgo, to: today)
+    }
+
+    /// Calculates adherence for the last 31 days (including today).
+    func calculateMonthlyAdherence() -> Double? {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        guard let thirtyOneDaysAgo = calendar.date(byAdding: .day, value: -30, to: today) else { return nil } // Today + 30 previous days = 31 days
+        return calculateAdherence(from: thirtyOneDaysAgo, to: today)
+    }
+    
+    /// Counts the number of doses due today based on scheduledDoses.
+    var dosesDueToday: Int {
+        guard let scheduledDoses = scheduledDoses else { return 0 }
+        let calendar = Calendar.current
+        let now = Date()
+        let startOfToday = calendar.startOfDay(for: now)
+        return scheduledDoses.filter { dose in
+            let doseTimeComponents = calendar.dateComponents([.hour, .minute], from: dose.time)
+            guard let doseTimeToday = calendar.date(bySettingHour: doseTimeComponents.hour!,
+                                                   minute: doseTimeComponents.minute!,
+                                                   second: 0,
+                                                   of: now) else { return false }
+            return doseTimeToday <= now // Count only doses due by now
+        }.count
+    }
+
+    /// Counts the number of doses taken today based on doseLogEvents.
+    var dosesTakenToday: Int {
+        guard let doseLogEvents = doseLogEvents else { return 0 }
+        let calendar = Calendar.current
+        let now = Date()
+        let startOfToday = calendar.startOfDay(for: now)
+        return doseLogEvents.filter { event in
+            calendar.isDate(event.dateRecorded, inSameDayAs: startOfToday) && event.isTaken
+        }.count
+    }
+}

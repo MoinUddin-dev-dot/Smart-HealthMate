@@ -1,50 +1,50 @@
 import SwiftUI
+import SwiftData
+import FirebaseAuth
+import UserNotifications
+import BackgroundTasks // Keep if background tasks are used elsewhere, otherwise can be removed.
 
-// SMAAlert Models (for Email Alert System)
-struct SMAAlert: Identifiable {
-    let id = UUID()
-    let type: SMAAlertType
-    let recipient: String
-    var subject: String // Changed to var so it can be potentially updated
+// MARK: - SMAAlert Model
+@Model
+final class SMAAlert: Identifiable {
+    let id: UUID
+    @Attribute(.allowsCloudEncryption) var type: SMAAlertType
+    var recipient: String
+    var subject: String
     var status: SMAAlertStatus
     let sentAt: Date
-    var content: String // Changed to var so it can be potentially updated
-
-    enum SMAAlertType: String, CaseIterable, Codable {
+    var content: String
+    
+    enum SMAAlertType: String, Codable, CaseIterable {
         case emergency = "Emergency"
         case reminder = "Reminder"
         case report = "Report"
+        case unknown
+        
+        init(from decoder: Decoder) throws {
+            let container = try decoder.singleValueContainer()
+            let rawValue = try container.decode(String.self)
+            self = SMAAlertType(rawValue: rawValue) ?? .unknown
+        }
     }
-
+    
     enum SMAAlertStatus: String, Codable {
         case sent = "Sent"
         case failed = "Failed"
         case pending = "Pending"
     }
-}
-
-// MARK: - Updated SMAAlertSettings struct
-struct SMAAlertSettings {
-    var emergencyContacts: [String]
-    var bpThreshold: SMABPThreshold // Now contains min/max for systolic/diastolic
-    var fastingSugarThreshold: SMASugarThreshold
-    var afterMealSugarThreshold: SMASugarThreshold
-    var enableEmergencyAlerts: Bool
-    var enableReminderAlerts: Bool
-    var enableReportAlerts: Bool
-
-    struct SMABPThreshold {
-        var minSystolic: Int
-        var maxSystolic: Int
-        var minDiastolic: Int
-        var maxDiastolic: Int
-    }
     
-    struct SMASugarThreshold {
-        var min: Int
-        var max: Int
+    init(id: UUID = UUID(), type: SMAAlertType, recipient: String, subject: String, status: SMAAlertStatus, sentAt: Date, content: String) {
+        self.id = id
+        self.type = type
+        self.recipient = recipient
+        self.subject = subject
+        self.status = status
+        self.sentAt = sentAt
+        self.content = content
     }
 }
+
 
 
 // MARK: - DateFormatter Extension (for SMAMedicine and SMAAlerts)
@@ -60,7 +60,6 @@ extension DateFormatter {
 }
 
 // MARK: - Reusable UI Components (Unique Naming - UNCHANGED)
-
 struct SMACustomCards<Content: View>: View {
     let content: Content
     var backgroundColor: Color = .white
@@ -68,7 +67,7 @@ struct SMACustomCards<Content: View>: View {
     var gradient: LinearGradient? = nil
     var shadowColor: Color = .black.opacity(0.05)
     var shadowRadius: CGFloat = 4
-
+    
     init(backgroundColor: Color = .white, borderColor: Color = .clear, gradient: LinearGradient? = nil, shadowColor: Color = .black.opacity(0.05), shadowRadius: CGFloat = 4, @ViewBuilder content: () -> Content) {
         self.backgroundColor = backgroundColor
         self.borderColor = borderColor
@@ -77,7 +76,7 @@ struct SMACustomCards<Content: View>: View {
         self.shadowRadius = shadowRadius
         self.content = content()
     }
-
+    
     var body: some View {
         if let gradient = gradient {
             content
@@ -104,12 +103,12 @@ struct SMACustomCards<Content: View>: View {
 struct SMACustomCardContents<Content: View>: View {
     let content: Content
     var paddingValue: CGFloat = 16
-
+    
     init(paddingValue: CGFloat = 16, @ViewBuilder content: () -> Content) {
         self.paddingValue = paddingValue
         self.content = content()
     }
-
+    
     var body: some View {
         content
             .padding(paddingValue)
@@ -120,13 +119,13 @@ struct SMACustomCardHeaders<Content: View>: View {
     let content: Content
     var paddingBottom: CGFloat = 12
     var showBorder: Bool = false
-
+    
     init(paddingBottom: CGFloat = 12, showBorder: Bool = false, @ViewBuilder content: () -> Content) {
         self.paddingBottom = paddingBottom
         self.showBorder = showBorder
         self.content = content()
     }
-
+    
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             content
@@ -144,7 +143,7 @@ struct SMACustomCardTitles: View {
     let text: String
     var fontSize: CGFloat = 18
     var textColor: Color = .primary
-
+    
     var body: some View {
         Text(text)
             .font(.system(size: fontSize, weight: .semibold))
@@ -155,7 +154,7 @@ struct SMACustomCardTitles: View {
 struct SMACustomCardDescriptions: View {
     let text: String
     var textColor: Color = .gray
-
+    
     var body: some View {
         Text(text)
             .font(.subheadline)
@@ -166,7 +165,7 @@ struct SMACustomCardDescriptions: View {
 struct SMACustomBadges: View {
     let text: String
     var variant: String = "secondary"
-
+    
     var body: some View {
         Text(text)
             .font(.caption2)
@@ -181,7 +180,7 @@ struct SMACustomBadges: View {
                     .stroke(borderColor, lineWidth: variant == "outline" ? 1 : 0)
             )
     }
-
+    
     private var badgeBackgroundColor: Color {
         switch variant {
         case "destructive": return Color.red.opacity(0.15)
@@ -189,7 +188,7 @@ struct SMACustomBadges: View {
         default: return Color.gray.opacity(0.15)
         }
     }
-
+    
     private var badgeForegroundColor: Color {
         switch variant {
         case "destructive": return Color.red.opacity(0.9)
@@ -197,7 +196,7 @@ struct SMACustomBadges: View {
         default: return Color.primary.opacity(0.8)
         }
     }
-
+    
     private var borderColor: Color {
         switch variant {
         case "outline": return Color.gray.opacity(0.4)
@@ -208,14 +207,14 @@ struct SMACustomBadges: View {
 
 struct SMAFlowLayout: Layout {
     var spacing: CGFloat = 0
-
+    
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let containerWidth = proposal.width ?? 0
         var currentX: CGFloat = 0
         var currentY: CGFloat = 0
         var rowHeight: CGFloat = 0
         var totalHeight: CGFloat = 0
-
+        
         for subview in subviews {
             let subviewSize = subview.sizeThatFits(.unspecified)
             if currentX + subviewSize.width > containerWidth {
@@ -229,13 +228,13 @@ struct SMAFlowLayout: Layout {
         }
         return CGSize(width: containerWidth, height: totalHeight)
     }
-
+    
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         let containerWidth = bounds.width
         var currentX: CGFloat = bounds.minX
         var currentY: CGFloat = bounds.minY
         var rowHeight: CGFloat = 0
-
+        
         for subview in subviews {
             let subviewSize = subview.sizeThatFits(.unspecified)
             if currentX + subviewSize.width > bounds.maxX {
@@ -250,138 +249,301 @@ struct SMAFlowLayout: Layout {
     }
 }
 
-// MARK: - EmailAlertsView (Main View for Alerts Tab)
-// This view manages and displays the email alert system.
-struct SMAEmailAlertsView: View {
-    let medicines: Int // Added binding
+// MARK: - MedicineNotificationManager (NEW)
+// This class handles scheduling and canceling local notifications for medicines.
+class MedicineNotificationManager: ObservableObject {
+    func scheduleNotifications(for medicine: Medicine) {
+        print("🔔 scheduleNotifications called for medicine: \(medicine.name)")
+        
+        // First, remove all pending notifications for this medicine to avoid duplicates
+        // and to update if times have changed.
+        var identifiersToCancel: [String] = []
+        for dose in medicine.scheduledDoses ?? [] {
+            identifiersToCancel.append("\(medicine.id.uuidString)-\(dose.id.uuidString)")
+        }
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: identifiersToCancel)
+        print("🔔 Cleared existing notifications for \(medicine.name) with identifiers: \(identifiersToCancel)")
+        
+        guard medicine.isActive && medicine.isCurrentlyActiveBasedOnDates else {
+            print("🔔 Medicine \(medicine.name) is not active or not within its date range. No notifications scheduled.")
+            return
+        }
+        
+        let calendar = Calendar.current
+        for dose in medicine.scheduledDoses ?? [] {
+            let components = calendar.dateComponents([.hour, .minute], from: dose.time)
+            
+            // Check if components can form a valid date (e.g., if hour/minute are valid)
+            guard let hour = components.hour, let minute = components.minute else {
+                print("🔔 Error: Invalid time components for dose \(dose.id.uuidString) of \(medicine.name). Skipping notification.")
+                continue
+            }
+            
+            let content = UNMutableNotificationContent()
+            content.title = "Medicine Reminder: \(medicine.name)"
+            content.body = "It's time to take your \(medicine.dosage) of \(medicine.name)."
+            content.sound = .default
+            
+            // Schedule the notification to repeat daily at the specified time
+            let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: true)
+            let requestIdentifier = "\(medicine.id.uuidString)-\(dose.id.uuidString)" // Unique ID for each dose
+            let request = UNNotificationRequest(identifier: requestIdentifier, content: content, trigger: trigger)
+            
+            UNUserNotificationCenter.current().add(request) { error in
+                if let error = error {
+                    print("🔔 Error scheduling notification for \(medicine.name) at \(hour):\(minute) (ID: \(requestIdentifier)): \(error.localizedDescription)")
+                } else {
+                    print("🔔 Successfully scheduled notification for \(medicine.name) at \(hour):\(minute) (ID: \(requestIdentifier))")
+                }
+            }
+        }
+    }
     
-
-    @State private var alerts: [SMAAlert] = [
-        SMAAlert(
-            type: .emergency,
-            recipient: "family@example.com",
-            subject: "🚨 Emergency Alert: High BP Detected",
-            status: .sent,
-            sentAt: Date().addingTimeInterval(-3600 * 2), // 2 hours ago
-            content: "BP Reading: 185/120 detected at 11:00 PM. Immediate attention advised."
-        ),
-        SMAAlert(
-            type: .reminder,
-            recipient: "user@example.com",
-            subject: "💊 Medicine Reminder: Missed Dose Alert",
-            status: .sent,
-            sentAt: Date().addingTimeInterval(-3600 * 4), // 4 hours ago
-            content: "You missed your evening Metformin dose. Please take it now if within 2 hours."
-        )
-    ]
-
-    @State private var settings: SMAAlertSettings = SMAAlertSettings(
-        emergencyContacts: ["family@example.com", "doctor@example.com"],
-        bpThreshold: SMAAlertSettings.SMABPThreshold(minSystolic: 70, maxSystolic: 180, minDiastolic: 40, maxDiastolic: 110),
-        fastingSugarThreshold: SMAAlertSettings.SMASugarThreshold(min: 70, max: 130),
-        afterMealSugarThreshold: SMAAlertSettings.SMASugarThreshold(min: 0, max: 179),
-        enableEmergencyAlerts: true,
-        enableReminderAlerts: true,
-        enableReportAlerts: false
-    )
-
-    @State private var isSettingsOpen: Bool = false
-    @State private var newContact: String = ""
-
-    // MARK: - Lifecycle
-    init(medicines: Int) {
-        self.medicines = medicines
-    }
-
-    // MARK: - Actions
-    private func sendTestAlert() {
-        let testAlert = SMAAlert(
-            type: .emergency,
-            recipient: settings.emergencyContacts.first ?? "test@example.com",
-            subject: "🧪 Test Alert: System Check",
-            status: .pending,
-            sentAt: Date(),
-            content: "This is a test alert to verify the email system is working properly."
-        )
-        alerts.insert(testAlert, at: 0)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            if let index = alerts.firstIndex(where: { $0.id == testAlert.id }) {
-                alerts[index].status = .sent
-            }
-            print("Test alert sent successfully!")
+    func cancelNotifications(for medicine: Medicine) {
+        var identifiersToCancel: [String] = []
+        for dose in medicine.scheduledDoses ?? [] {
+            identifiersToCancel.append("\(medicine.id.uuidString)-\(dose.id.uuidString)")
         }
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: identifiersToCancel)
+        print("🔔 Cancelled notifications for medicine \(medicine.name) and its doses with identifiers: \(identifiersToCancel)")
     }
-
-    private func simulateEmergencyAlert() {
-        let emergencyAlert = SMAAlert(
-            type: .emergency,
-            recipient: settings.emergencyContacts.first ?? "emergency@example.com",
-            subject: "🚨 Emergency Alert: Critical BP Reading",
-            status: .pending,
-            sentAt: Date(),
-            content: """
-Dear Emergency Contact,
-
-An emergency has been detected for John Doe.
-
-🩺 Critical Reading Details:
-• BP Reading: 195/125 mmHg
-• Time: \(Date().formatted(date: .numeric, time: .shortened))
-• Status: CRITICAL - Immediate attention required
-
-📍 Patient Information:
-• Last Known Location: Home
-• Emergency Medications: Amlodipine 5mg, Metformin 500mg
-• Recent Symptoms: Severe headache reported
-
-⚡ Immediate Actions Recommended:
-1. Contact patient immediately
-2. Consider emergency medical services
-3. Ensure patient is seated and calm
-4. Monitor for additional symptoms
-
-This alert was generated automatically by Smart HealthMate.
-
-Best regards,
-Smart HealthMate Emergency System
-"""
-        )
-        alerts.insert(emergencyAlert, at: 0)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            if let index = alerts.firstIndex(where: { $0.id == emergencyAlert.id }) {
-                alerts[index].status = .sent
-            }
-            print("Emergency alert sent to all contacts!")
-        }
-    }
-
-    private func addEmergencyContact() {
-        if !newContact.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && newContact.contains("@") {
-            if !settings.emergencyContacts.contains(newContact) {
-                settings.emergencyContacts.append(newContact)
-                newContact = ""
-                print("Emergency contact added")
-            } else {
-                print("Contact already exists")
-            }
+    
+    // New helper function to check pending notifications (for debugging)
+    func checkPendingNotifications() async {
+        let center = UNUserNotificationCenter.current()
+        let pendingRequests = await center.pendingNotificationRequests()
+        
+        print("🔔 --- Current Pending Notifications (\(pendingRequests.count)) ---")
+        if pendingRequests.isEmpty {
+            print("    No pending notifications.")
         } else {
-            print("Please enter a valid email address")
+            for request in pendingRequests {
+                if let calendarTrigger = request.trigger as? UNCalendarNotificationTrigger,
+                   let nextTriggerDate = calendarTrigger.nextTriggerDate() {
+                    print("    - ID: \(request.identifier), Title: \(request.content.title), Next Trigger: \(nextTriggerDate)")
+                } else {
+                    print("    - ID: \(request.identifier), Title: \(request.content.title), Trigger Type: \(String(describing: request.trigger?.classForCoder))")
+                }
+            }
         }
+        print("🔔 --------------------------------------------------")
     }
+}
 
-    private func removeEmergencyContact(email: String) {
-        settings.emergencyContacts.removeAll { $0 == email }
-        print("Emergency contact removed")
+// MARK: - NotificationDelegate (NEW)
+//// This class handles foreground notification presentation and user interaction.
+//final class NotificationDelegate: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
+//    func userNotificationCenter(_ center: UNUserNotificationCenter,
+//                                 willPresent notification: UNNotification,
+//                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+//        // This method is called when a notification is delivered while the app is in the foreground.
+//        print("🔔 Foreground notification received: \(notification.request.content.title) (ID: \(notification.request.identifier))")
+//        completionHandler([.banner, .sound, .badge]) // Show banner, play sound, update badge
+//    }
+//
+//    func userNotificationCenter(_ center: UNUserNotificationCenter,
+//                                 didReceive response: UNNotificationResponse,
+//                                 withCompletionHandler completionHandler: @escaping () -> Void) {
+//        // This method is called when the user interacts with a notification.
+//        print("🔔 User interacted with notification: \(response.notification.request.content.title) (ID: \(response.notification.request.identifier))")
+//        // You can add logic here to navigate to a specific part of your app
+//        // based on the notification's userInfo or identifier.
+//        completionHandler()
+//    }
+//}
+
+// MARK: - SMAEmailAlertsView (Main View for Alerts Tab - 5th Screen)
+struct SMAEmailAlertsView: View {
+    @EnvironmentObject var authManager: AuthManager
+    @Environment(\.modelContext) private var modelContext
+    
+    // MARK: - State for Dynamic Queries
+    @State private var currentUserID: String = "no-user"
+    @State private var currentDayStart: Date = Calendar.current.startOfDay(for: Date())
+    @State private var currentDayEnd: Date = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: Date()))!
+    
+    // MARK: - Queries
+    @Query private var alerts: [SMAAlert]
+    @Query private var userSettingsQuery: [UserSettings]
+    @Query private var medicines: [Medicine]
+    @Query private var vitalReadings: [VitalReading]
+    
+    // Computed property to get current user's settings
+    private var currentUserSettings: UserSettings? {
+        userSettingsQuery.first { $0.userID == authManager.currentUserUID }
     }
     
-    private func updateEmergencyContact(oldContact: String, newContact: String) {
-        if let index = settings.emergencyContacts.firstIndex(of: oldContact) {
-            settings.emergencyContacts[index] = newContact
-            print("Emergency contact updated")
+    // Initializer to set up dynamic query predicates
+    init() {
+        let userID = Auth.auth().currentUser?.uid ?? "no-user"
+        let startOfDay = Calendar.current.startOfDay(for: Date())
+        let endOfDay = Calendar.current.date(byAdding: .day, value: 1, to: startOfDay)!
+        
+        _currentUserID = State(initialValue: userID)
+        _currentDayStart = State(initialValue: startOfDay)
+        _currentDayEnd = State(initialValue: endOfDay)
+        
+        // Query for alerts (no userID filter here, filter in body)
+        let alertPredicate = #Predicate<SMAAlert> { alert in
+            alert.sentAt >= startOfDay && alert.sentAt < endOfDay
+        }
+        _alerts = Query(filter: alertPredicate, sort: \.sentAt, order: .reverse)
+        
+        // Query for user settings
+        let settingsPredicate = #Predicate<UserSettings> { settings in
+            settings.userID == userID
+        }
+        _userSettingsQuery = Query(filter: settingsPredicate)
+        
+        // Query for medicines
+        let medicinePredicate = #Predicate<Medicine> { medicine in
+            medicine.userSettings?.userID == userID
+        }
+        _medicines = Query(filter: medicinePredicate)
+        
+        // Query for vital readings
+        let vitalPredicate = #Predicate<VitalReading> { reading in
+            reading.userSettings?.userID == userID && reading.date >= startOfDay && reading.date < endOfDay
+        }
+        _vitalReadings = Query(filter: vitalPredicate, sort: \.date, order: .reverse)
+    }
+    
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    // Header
+                    SMAEmailAlertsHeaderView(
+                        sendTestAlert: {
+                            if let settings = currentUserSettings {
+                                let alert = SMAAlert(
+                                    type: .report,
+                                    recipient: settings.alertSettings.emergencyContacts.joined(separator: ", "),
+                                    subject: "📢 Test Alert",
+                                    status: .pending,
+                                    sentAt: Date(),
+                                    content: "This is a test alert from Smart HealthMate. (This alert only logs in the app; no local notification is sent from here.)"
+                                )
+                                modelContext.insert(alert)
+                                do {
+                                    try modelContext.save()
+                                    print("Test alert saved: \(alert.subject), type: \(alert.type.rawValue)")
+                                    // No local notification sent from here.
+                                    alert.status = .sent // Simulate immediate sending for logging
+                                    try modelContext.save()
+                                } catch {
+                                    print("Error saving test alert: \(error.localizedDescription)")
+                                }
+                            } else {
+                                print("Cannot send test alert: No user settings found")
+                            }
+                        },
+                        simulateEmergencyAlert: {
+                            if let settings = currentUserSettings {
+                                let alert = SMAAlert(
+                                    type: .emergency,
+                                    recipient: settings.alertSettings.emergencyContacts.joined(separator: ", "),
+                                    subject: "🚨 Simulated Emergency Alert",
+                                    status: .pending,
+                                    sentAt: Date(),
+                                    content: "This is a simulated emergency alert from Smart HealthMate. (This alert only logs in the app; no local notification is sent from here.)"
+                                )
+                                modelContext.insert(alert)
+                                do {
+                                    try modelContext.save()
+                                    print("Emergency alert saved: \(alert.subject), type: \(alert.type.rawValue)")
+                                    // No local notification sent from here.
+                                    alert.status = .sent // Simulate immediate sending for logging
+                                    try modelContext.save()
+                                } catch {
+                                    print("Error saving emergency alert: \(error.localizedDescription)")
+                                }
+                            } else {
+                                print("Cannot send emergency alert: No user settings found")
+                            }
+                        }
+                    )
+                    .padding(.horizontal)
+                    
+                    // Alert Stats Cards
+                    VStack(spacing: 16) {
+                        SMAEmailAlertStatsCard(
+                            title: "Emergency Alerts",
+                            count: alerts.filter { $0.type == .emergency }.count,
+                            icon: "exclamationmark.triangle.fill",
+                            iconColor: .red,
+                            cardBorderColor: .red.opacity(0.2),
+                            cardGradient: LinearGradient(gradient: Gradient(colors: [.red.opacity(0.05), .red.opacity(0.1)]), startPoint: .topLeading, endPoint: .bottomTrailing)
+                        )
+                        SMAEmailAlertStatsCard(
+                            title: "Emergency Contacts",
+                            count: currentUserSettings?.alertSettings.emergencyContacts.count ?? 0,
+                            icon: "envelope.fill",
+                            iconColor: .blue,
+                            cardBorderColor: .blue.opacity(0.2),
+                            cardGradient: LinearGradient(gradient: Gradient(colors: [.blue.opacity(0.05), .blue.opacity(0.1)]), startPoint: .topLeading, endPoint: .bottomTrailing)
+                        )
+                        SMAEmailAlertStatsCard(
+                            title: "Delivery Rate",
+                            countText: alerts.isEmpty ? "0%" : "\(Int(round(Double(alerts.filter { $0.status == .sent }.count) / Double(alerts.count) * 100)))%",
+                            icon: "checkmark.circle.fill",
+                            iconColor: .green,
+                            cardBorderColor: .green.opacity(0.2),
+                            cardGradient: LinearGradient(gradient: Gradient(colors: [.green.opacity(0.05), .green.opacity(0.1)]), startPoint: .topLeading, endPoint: .bottomTrailing)
+                        )
+                    }
+                    .padding(.horizontal, 20)
+                    
+                    // Recent Alerts Section or Placeholder
+                    if alerts.isEmpty {
+                        SMANoEmailAlertsPlaceholderView()
+                            .padding(.horizontal)
+                    } else {
+                        SMARecentEmailAlertsSection(
+                            alerts: alerts,
+                            getStatusIcon: getStatusIcon,
+                            getStatusIconColor: getStatusIconColor,
+                            getTypeForBadge: getTypeForBadge,
+                            getBadgeColors: getBadgeColors
+                        )
+                    }
+                }
+                .padding(.bottom, 80)
+                .padding(.vertical)
+            }
+            .navigationTitle("Email Alert System")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .onAppear {
+            requestNotificationPermission() // Still request permission for the app
+            cleanUpInvalidAlerts()
+            updateState()
+            if authManager.currentUserUID != nil {
+                Task {
+                    await deleteOldAlerts()
+                    await checkAndSendDailyAlerts()
+                }
+            }
+        }
+        .onChange(of: authManager.currentUserUID) { _, newUID in
+            updateState()
+            cleanUpInvalidAlerts()
+            if newUID != nil {
+                Task {
+                    await deleteOldAlerts()
+                    await checkAndSendDailyAlerts()
+                }
+            }
         }
     }
-
-    // MARK: - Helper for Icons and Colors
+    
+    // MARK: - Helper Functions
+    private func updateState() {
+        currentUserID = authManager.currentUserUID ?? "no-user"
+        currentDayStart = Calendar.current.startOfDay(for: Date())
+        currentDayEnd = Calendar.current.date(byAdding: .day, value: 1, to: currentDayStart)!
+    }
+    
     private func getStatusIcon(_ status: SMAAlert.SMAAlertStatus) -> Image {
         switch status {
         case .sent: return Image(systemName: "checkmark.circle.fill")
@@ -389,7 +551,7 @@ Smart HealthMate Emergency System
         case .pending: return Image(systemName: "hourglass.circle.fill")
         }
     }
-
+    
     private func getStatusIconColor(_ status: SMAAlert.SMAAlertStatus) -> Color {
         switch status {
         case .sent: return .green
@@ -397,7 +559,7 @@ Smart HealthMate Emergency System
         case .pending: return .orange
         }
     }
-
+    
     private func getTypeForBadge(_ type: SMAAlert.SMAAlertType) -> String {
         return type.rawValue
     }
@@ -406,7 +568,7 @@ Smart HealthMate Emergency System
         var bgColor: Color = .gray.opacity(0.1)
         var textColor: Color = .gray
         var borderColor: Color = .gray.opacity(0.2)
-
+        
         switch type {
         case "Emergency":
             bgColor = .red.opacity(0.1)
@@ -420,158 +582,344 @@ Smart HealthMate Emergency System
             bgColor = .green.opacity(0.1)
             textColor = .green
             borderColor = .green.opacity(0.2)
+        case "unknown":
+            bgColor = .gray.opacity(0.1)
+            textColor = .gray
+            borderColor = .gray.opacity(0.2)
         default:
             break
         }
         return (bgColor, textColor, borderColor)
     }
+    
+    // MARK: - Notification Permission
+    private func requestNotificationPermission() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
+            if let error = error {
+                print("Notification permission error: \(error.localizedDescription)")
+            } else {
+                print("Notification permission granted: \(granted)")
+            }
+        }
+    }
+    
+    // NEW: Helper function to send local notification for email alert confirmation
+    private func sendLocalNotification(for alert: SMAAlert) {
+        let content = UNMutableNotificationContent()
+        content.title = "Email Alert Sent: \(alert.subject)"
+        content.body = "To: \(alert.recipient). Content: \(alert.content.prefix(100))" + (alert.content.count > 100 ? "..." : "")
+        content.sound = .default
+        content.userInfo = ["alertID": alert.id.uuidString, "alertType": alert.type.rawValue]
+        
+        let request = UNNotificationRequest(identifier: "email_alert_\(alert.id.uuidString)", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error = error {
+                print("Error sending local notification for email alert: \(error.localizedDescription)")
+            } else {
+                print("Local notification sent for email alert: \(alert.subject)")
+            }
+        }
+    }
+    
+    // NEW: Helper function to simulate email sending and log it
+    private func simulateAndLogEmailSend(for alert: SMAAlert) {
+        print("\n--- SIMULATING EMAIL SEND ---")
+        print("Type: \(alert.type.rawValue)")
+        print("Recipient(s): \(alert.recipient)")
+        print("Subject: \(alert.subject)")
+        print("Content:\n\(alert.content)")
+        print("--- END SIMULATION ---\n")
+    }
+    
+    // MARK: - Alert Cleanup Logic
+    private func cleanUpInvalidAlerts() {
+        do {
+            let descriptor = FetchDescriptor<SMAAlert>()
+            let allAlerts = try modelContext.fetch(descriptor)
+            let validTypes = SMAAlert.SMAAlertType.allCases.map { $0.rawValue }.filter { $0 != "unknown" }
+            let invalidAlerts = allAlerts.filter { !validTypes.contains($0.type.rawValue) }
+            
+            for alert in invalidAlerts {
+                print("Deleting invalid alert: ID=\(alert.id), type=\(alert.type.rawValue), subject=\(alert.subject)")
+                modelContext.delete(alert)
+            }
+            try modelContext.save()
+            print("Deleted \(invalidAlerts.count) invalid alerts")
+        } catch {
+            print("Error cleaning up invalid alerts: \(error.localizedDescription)")
+        }
+    }
+    
+    private func deleteOldAlerts() async {
+        guard let uid = authManager.currentUserUID else { return }
+        let calendar = Calendar.current
+        let oneDayAgo = calendar.date(byAdding: .day, value: -1, to: Date())!
+        
+        do {
+            let predicate = #Predicate<SMAAlert> { alert in
+                alert.sentAt < oneDayAgo && alert.recipient.contains(uid)
+            }
+            let descriptor = FetchDescriptor<SMAAlert>(predicate: predicate)
+            let oldAlerts = try modelContext.fetch(descriptor)
+            
+            for alert in oldAlerts {
+                modelContext.delete(alert)
+            }
+            try modelContext.save()
+            print("Deleted \(oldAlerts.count) old alerts for user \(uid).")
+        } catch {
+            print("Error deleting old alerts: \(error)")
+        }
+    }
+    
+    // MARK: - Alert Generation Logic (UPDATED)
+    private func checkAndSendDailyAlerts() async {
+        guard let uid = authManager.currentUserUID,
+              let currentUserDisplayName = authManager.currentUserDisplayName,
+              let settings = currentUserSettings?.alertSettings else {
+            print("Cannot check and send daily alerts: User not logged in or settings unavailable.")
+            return
+        }
+        
+        let today = Date()
+        let calendar = Calendar.current
+        let startOfDay = calendar.startOfDay(for: today)
+        let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay)!
+        
+        do {
+            let predicate = #Predicate<SMAAlert> { alert in
+                alert.sentAt >= startOfDay && alert.sentAt < endOfDay && alert.recipient.contains(uid)
+            }
+            let descriptor = FetchDescriptor<SMAAlert>(predicate: predicate)
+            let existingAlertsToday = try modelContext.fetch(descriptor)
+            
+            // MARK: - Check for Missed Medicines (Daily Report)
+            // Only send one daily medicine report per day
+            let hasSentDailyMedicineReport = existingAlertsToday.contains(where: { $0.type == .report && $0.subject.contains("Daily Medicine Report") })
+            
+            if !hasSentDailyMedicineReport {
+                let userMedicines = medicines.filter { $0.userSettings?.userID == uid && $0.isActive && $0.isCurrentlyActiveBasedOnDates }
+                var missedMedicinesDetails: [String] = []
+                
+                // Ensure calendar and today are defined once outside the inner loop
+                let calendar = Calendar.current
+                let today = Date() // Get the current date
+                
+                for medicine in userMedicines {
+                                                    // Ensure calendar and today are defined once outside the inner loop
+                                                    let calendar = Calendar.current
+                                                    let today = Date()
 
-    // MARK: - Main Body
-    var body: some View {
-        NavigationView { // NavigationView se wrap kiya gaya hai
-            ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Automated health emergency and reminder notifications")
-                            .font(.subheadline)
-                            .foregroundColor(.gray)
-                            .padding(.horizontal)
-                    }
+                                                    // Check if the medicine has any missed doses today
+                                                    let missedDosesForMedicine = medicine.scheduledDoses?.filter { dose in
+                                                        let doseTimeComponents = calendar.dateComponents([.hour, .minute], from: dose.time)
+                                                        guard let scheduledTimeToday = calendar.date(bySettingHour: doseTimeComponents.hour!, minute: doseTimeComponents.minute!, second: 0, of: today) else { return false }
+                                                        
+                                                        // 1. Check if the scheduled time for this dose on today's date has passed
+                                                        let isScheduledTimePast = scheduledTimeToday < today
 
-                    // Medicine Tracker Stats (NEWLY ADDED SECTION)
-                    // Assuming SMAMedicineTrackerStats exists and takes medicinesCount
-                    // If not, this line will cause a compile error.
-                     SMAMedicineTrackerStats(medicinesCount: medicines)
-                    //    .padding(.horizontal) // Apply horizontal padding for these cards
+                                                        // 2. Check if a DoseTakenEvent exists for this specific ScheduledDose on today's date
+                                                        //    Use 'dose' as the parameter name here as defined by the filter closure
+                                                        let doseWasTakenToday = medicine.doseLogEvents?.contains(where: { event in
+                                                            calendar.isDate(event.dateRecorded, inSameDayAs: today) && event.scheduledDose?.id == dose.id
+                                                        }) ?? false
 
-                    // Alert Stats (Now arranged vertically)
-                    VStack(spacing: 16) {
-                        SMAEmailAlertStatsCard(
-                            title: "Emergency Alerts",
-                            count: alerts.filter { $0.type == .emergency }.count,
-                            icon: "exclamationmark.triangle.fill",
-                            iconColor: .red,
-                            cardBorderColor: .red.opacity(0.2),
-                            cardGradient: LinearGradient(gradient: Gradient(colors: [Color.red.opacity(0.05), Color.red.opacity(0.1)]), startPoint: .topLeading, endPoint: .bottomTrailing)
-                        )
-                        SMAEmailAlertStatsCard(
-                            title: "Emergency Contacts",
-                            count: settings.emergencyContacts.count,
-                            icon: "envelope.fill",
-                            iconColor: .blue,
-                            cardBorderColor: .blue.opacity(0.2),
-                            cardGradient: LinearGradient(gradient: Gradient(colors: [Color.blue.opacity(0.05), Color.blue.opacity(0.1)]), startPoint: .topLeading, endPoint: .bottomTrailing)
-                        )
-                        SMAEmailAlertStatsCard(
-                            title: "Delivery Rate",
-                            countText: "\(alerts.isEmpty ? 0 : Int(round(Double(alerts.filter { $0.status == .sent }.count) / Double(alerts.count) * 100)))%",
-                            icon: "checkmark.circle.fill",
-                            iconColor: .green,
-                            cardBorderColor: .green.opacity(0.2),
-                            cardGradient: LinearGradient(gradient: Gradient(colors: [Color.green.opacity(0.05), Color.green.opacity(0.1)]), startPoint: .topLeading, endPoint: .bottomTrailing)
-                        )
-                    }
-                    .padding(.horizontal, 20)
-                    // Padding for the cards stack
+                                                        // 3. A dose is "missed" if its scheduled time is past AND it has NOT been taken today
+                                                        return isScheduledTimePast && !doseWasTakenToday
+                                                    } ?? [] // Ensure you provide a default empty array if scheduledDoses is nil
 
-                    // Recent Alerts
-                    SMARecentEmailAlertsSection(
-                        alerts: alerts,
-                        getStatusIcon: getStatusIcon,
-                        getStatusIconColor: getStatusIconColor,
-                        getTypeForBadge: getTypeForBadge,
-                        getBadgeColors: getBadgeColors
+                                                    if !missedDosesForMedicine.isEmpty {
+                                                        let missedTimes = missedDosesForMedicine.map {
+                                                            // FIX: Use the simplified formatted(date:time:) syntax
+                                                            $0.time.formatted(.dateTime.hour().minute())                                                        }.joined(separator: ", ")
+                                                        missedMedicinesDetails.append("• \(medicine.name) (\(medicine.dosage)) - Missed at: \(missedTimes)")
+                                                    }
+                                                }
+                
+                if !missedMedicinesDetails.isEmpty {
+                    let recipient = settings.emergencyContacts.joined(separator: ", ")
+                    let content = """
+Dear Emergency Contact,
+
+This is your daily medicine adherence report for \(currentUserDisplayName).
+
+The following medicines were missed today:
+\(missedMedicinesDetails.joined(separator: "\n"))
+
+📅 Date: \(Date().formatted(date: .numeric, time: .shortened))
+
+⚡ Recommended Action:
+• Please follow up with \(currentUserDisplayName) regarding their medication adherence.
+
+This report was generated automatically by Smart HealthMate.
+
+Best regards,
+Smart HealthMate System
+"""
+                    let reminderAlert = SMAAlert(
+                        type: .report, // Changed to .report for daily reports
+                        recipient: recipient,
+                        subject: "💊 Daily Medicine Report: Missed Doses for \(currentUserDisplayName)",
+                        status: .pending,
+                        sentAt: Date(),
+                        content: content
                     )
-
-                    // No Alerts Placeholder
-                    if alerts.isEmpty {
-                        SMANoEmailAlertsPlaceholderView()
+                    modelContext.insert(reminderAlert)
+                    do {
+                        try modelContext.save()
+                        print("Daily medicine report for missed doses added to SwiftData for emergency contacts: \(recipient).")
+                        simulateAndLogEmailSend(for: reminderAlert)
+                        reminderAlert.status = .sent // Simulate immediate sending
+                        try modelContext.save()
+                        sendLocalNotification(for: reminderAlert) // Local notification for confirmation
+                    } catch {
+                        print("Error saving daily medicine report: \(error.localizedDescription)")
                     }
+                }
+            }
+            
+            
+            // MARK: - Check for Out-of-Threshold Vital Readings (BP & Sugar)
+            let userVitalReadings = vitalReadings.filter { $0.userSettings?.userID == uid && $0.date >= startOfDay && $0.date < endOfDay }
+            
+            // Check BP Readings
+            if let latestBP = userVitalReadings.filter({ $0.type == .bp }).sorted(by: { $0.date > $1.date }).first,
+               let systolic = latestBP.systolic, let diastolic = latestBP.diastolic {
+                let bpThreshold = settings.bpThreshold
+                var bpAlertNeeded = false
+                var bpAlertContent = ""
+                
+                if systolic < bpThreshold.minSystolic || systolic > bpThreshold.maxSystolic {
+                    bpAlertNeeded = true
+                    bpAlertContent += "Systolic pressure is outside your set thresholds (\(bpThreshold.minSystolic)-\(bpThreshold.maxSystolic)). "
+                }
+                if diastolic < bpThreshold.minDiastolic || diastolic > bpThreshold.maxDiastolic {
+                    bpAlertNeeded = true
+                    bpAlertContent += "Diastolic pressure is outside your set thresholds (\(bpThreshold.minDiastolic)-\(bpThreshold.maxDiastolic))."
                 }
                 
-                .padding(.bottom, 80)
-                .padding(.vertical) // Overall vertical padding for the scroll view content
-            }
-            .navigationTitle("Email Alert System")
-            // .inline to make space for custom title view
-            .toolbar {
-//                ToolbarItem(placement: .principal) { // principal placement for custom title view
-//                    VStack(alignment: .center, spacing: 4) { // Centered for cleaner look
-//                        Text("Email Alert System")
-//                            .font(.headline)
-//                            .fontWeight(.bold)
-//                            .foregroundColor(.gray.opacity(0.9))
-//                            .lineLimit(1) // Ensure it doesn't wrap and take too much space
-//                            .minimumScaleFactor(0.8) // Allow font to scale down if needed
-//                        Text("Automated health emergency and reminder notifications")
-//                            .font(.caption)
-//                            .foregroundColor(.gray.opacity(0.7))
-//                            .lineLimit(1) // Ensure it doesn't wrap
-//                            .minimumScaleFactor(0.7) // Allow font to scale down if needed
-//                    }
-//                }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    HStack(spacing: 8) { // Buttons ko HStack mein rakha gaya hai
-                        Button(action: sendTestAlert) {
-                            Text("Test")
-                                .font(.caption)
-                                .padding(.vertical, 8)
-                                .padding(.horizontal, 10)
-                                .background(Color.gray.opacity(0.1))
-                                .foregroundColor(.primary)
-                                .cornerRadius(8)
-                        }
-                        
-                        Button(action: simulateEmergencyAlert) {
-                            Text("Simulate")
-                                .font(.caption)
-                                .padding(.vertical, 8)
-                                .padding(.horizontal, 10)
-                                .background(Color.red.opacity(0.7))
-                                .foregroundColor(.white)
-                                .cornerRadius(8)
-                        }
-                        
-                        Button(action: { isSettingsOpen = true }) {
-                            Text("Settings")
-                                .font(.caption)
-                                .padding(.vertical, 8)
-                                .padding(.horizontal, 10)
-                                .background(Color.gray.opacity(0.1))
-                                .foregroundColor(.primary)
-                                .cornerRadius(8)
-                        }
+                // Check if an emergency BP alert has already been sent today
+                let hasSentBPAlertToday = existingAlertsToday.contains(where: { $0.type == .emergency && $0.subject.contains("BP Out of Range!") })
+                
+                if bpAlertNeeded && !hasSentBPAlertToday {
+                    let recipient = settings.emergencyContacts.joined(separator: ", ")
+                    let content = """
+Dear Emergency Contact,
+
+An emergency has been detected for \(currentUserDisplayName).
+
+🩺 BP Reading Details:
+• Reading: \(systolic)/\(diastolic) mmHg
+• Time: \(latestBP.date.formatted(date: .numeric, time: .shortened))
+• Status: OUT OF RANGE - Immediate attention required. \(bpAlertContent)
+
+⚡ Recommended Actions:
+1. Contact the patient immediately
+2. Consider emergency medical services
+3. Ensure patient is seated and calm
+4. Monitor for additional symptoms
+
+This alert was generated automatically by Smart HealthMate.
+
+Best regards,
+Smart HealthMate Emergency System
+"""
+                    let bpAlert = SMAAlert(
+                        type: .emergency,
+                        recipient: recipient,
+                        subject: "🚨 Emergency Alert: BP Out of Range!",
+                        status: .pending,
+                        sentAt: Date(),
+                        content: content
+                    )
+                    modelContext.insert(bpAlert)
+                    do {
+                        try modelContext.save()
+                        print("BP alert added to SwiftData for emergency contacts: \(recipient).")
+                        simulateAndLogEmailSend(for: bpAlert)
+                        bpAlert.status = .sent // Simulate immediate sending
+                        try modelContext.save()
+                        sendLocalNotification(for: bpAlert) // Local notification for confirmation
+                    } catch {
+                        print("Error saving BP alert: \(error.localizedDescription)")
                     }
-                    // Adding fixed width for toolbar items if necessary, or letting them adapt
-                    // .fixedSize(horizontal: true, vertical: false) // Optional: If buttons still break
                 }
             }
-            .sheet(isPresented: $isSettingsOpen) {
-                SMAEmailAlertsSettingsView(
-                    settings: $settings,
-                    isSettingsOpen: $isSettingsOpen,
-                    newContact: $newContact,
-                    addEmergencyContact: addEmergencyContact,
-                    removeEmergencyContact: removeEmergencyContact,
-                    updateEmergencyContact: updateEmergencyContact
-                )
+            
+            // Blood Sugar Readings
+            if let latestSugar = userVitalReadings.filter({ $0.type == .sugar }).sorted(by: { $0.date > $1.date }).first,
+               let sugarLevel = latestSugar.sugarLevel {
+                let sugarThreshold = settings.fastingSugarThreshold // Assuming fasting for simplicity here, can extend to afterMeal
+                var sugarAlertNeeded = false
+                var sugarAlertContent = ""
+                
+                if sugarLevel < sugarThreshold.min || sugarLevel > sugarThreshold.max {
+                    sugarAlertNeeded = true
+                    sugarAlertContent += "Blood sugar level is outside your set thresholds (\(sugarThreshold.min)-\(sugarThreshold.max))."
+                }
+                
+                // Check if an emergency Sugar alert has already been sent today
+                let hasSentSugarAlertToday = existingAlertsToday.contains(where: { $0.type == .emergency && $0.subject.contains("Blood Sugar Out of Range!") })
+                
+                if sugarAlertNeeded && !hasSentSugarAlertToday {
+                    let recipient = settings.emergencyContacts.joined(separator: ", ")
+                    let content = """
+Dear Emergency Contact,
+
+An emergency has been detected for \(currentUserDisplayName).
+
+🩺 Blood Sugar Reading Details:
+• Reading: \(sugarLevel) mg/dL
+• Time: \(latestSugar.date.formatted(date: .numeric, time: .shortened))
+• Status: OUT OF RANGE - Immediate attention required. \(sugarAlertContent)
+
+⚡ Recommended Actions:
+1. Contact the patient immediately
+2. Consider emergency medical services
+3. Monitor for additional symptoms
+
+This alert was generated automatically by Smart HealthMate.
+
+Best regards,
+Smart HealthMate Emergency System
+"""
+                    let sugarAlert = SMAAlert(
+                        type: .emergency,
+                        recipient: recipient,
+                        subject: "🚨 Emergency Alert: Blood Sugar Out of Range!",
+                        status: .pending,
+                        sentAt: Date(),
+                        content: content
+                    )
+                    modelContext.insert(sugarAlert)
+                    do {
+                        try modelContext.save()
+                        print("Blood sugar alert added to SwiftData for emergency contacts: \(recipient).")
+                        simulateAndLogEmailSend(for: sugarAlert)
+                        sugarAlert.status = .sent // Simulate immediate sending
+                        try modelContext.save()
+                        sendLocalNotification(for: sugarAlert) // Local notification for confirmation
+                    } catch {
+                        print("Error saving sugar alert: \(error.localizedDescription)")
+                    }
+                }
             }
+        } catch {
+            print("Error fetching existing alerts: \(error.localizedDescription)")
         }
     }
 }
 
 // MARK: - Single Alert Stat Card Sub-View
-// Ye ek naya component hai jo har ek stat card ko represent karta hai,
-// taake `SMAEmailAlertStatsView` mein inko vertically arrange kiya ja sake.
 struct SMAEmailAlertStatsCard: View {
     let title: String
     let count: Int?
-    let countText: String? // For percentage or custom text
+    let countText: String?
     let icon: String
     let iconColor: Color
     let cardBorderColor: Color
     let cardGradient: LinearGradient
-
+    
     init(title: String, count: Int? = nil, countText: String? = nil, icon: String, iconColor: Color, cardBorderColor: Color, cardGradient: LinearGradient) {
         self.title = title
         self.count = count
@@ -581,13 +929,13 @@ struct SMAEmailAlertStatsCard: View {
         self.cardBorderColor = cardBorderColor
         self.cardGradient = cardGradient
     }
-
+    
     var body: some View {
         SMACustomCards(borderColor: cardBorderColor, gradient: cardGradient) {
             SMACustomCardContents {
                 HStack {
                     VStack(alignment: .leading) {
-                        Text(countText ?? "\(count ?? 0)") // Use countText if available, otherwise count
+                        Text(countText ?? "\(count ?? 0)")
                             .font(.title)
                             .fontWeight(.bold)
                             .foregroundColor(iconColor.opacity(0.7))
@@ -612,10 +960,9 @@ struct SMAEmailAlertStatsCard: View {
 
 // Header and Action Buttons Sub-View
 struct SMAEmailAlertsHeaderView: View {
-    @Binding var isSettingsOpen: Bool
     let sendTestAlert: () -> Void
     let simulateEmergencyAlert: () -> Void
-
+    
     var body: some View {
         HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 4) {
@@ -654,485 +1001,39 @@ struct SMAEmailAlertsHeaderView: View {
                     .foregroundColor(.white)
                     .cornerRadius(8)
                 }
-                
-                Button(action: { isSettingsOpen = true }) {
-                    HStack {
-                        Image(systemName: "gearshape.fill")
-                        Text("Settings")
-                    }
-                    .font(.footnote)
-                    .padding(.vertical, 8)
-                    .padding(.horizontal, 12)
-                    .background(Color.gray.opacity(0.1))
-                    .foregroundColor(.primary)
-                    .cornerRadius(8)
-                }
             }
         }
     }
 }
 
-// MARK: - Settings Sheet Sub-View (for Alerts)
-// View for configuring email alert settings.
-struct SMAEmailAlertsSettingsView: View {
-    @Binding var settings: SMAAlertSettings
-    @Binding var isSettingsOpen: Bool
-    @Binding var newContact: String
-    let addEmergencyContact: () -> Void
-    let removeEmergencyContact: (String) -> Void
-    let updateEmergencyContact: (String, String) -> Void // New closure for updating
-
-    @State private var showingEditContactAlert = false
-    @State private var contactToEdit: String = ""
-    @State private var editedContactValue: String = ""
-
-    // State variables for TextField input (String) for MIN/MAX
-    @State private var minSystolicInput: String = ""
-    @State private var maxSystolicInput: String = ""
-    @State private var minDiastolicInput: String = ""
-    @State private var maxDiastolicInput: String = ""
-    @State private var minFastingSugarInput: String = ""
-    @State private var maxFastingSugarInput: String = ""
-    @State private var minAfterMealSugarInput: String = ""
-    @State private var maxAfterMealSugarInput: String = ""
-
-    // Focus states for each TextField
-    private enum Field: Hashable {
-        case minSystolic, maxSystolic
-        case minDiastolic, maxDiastolic
-        case minFastingSugar, maxFastingSugar
-        case minAfterMealSugar, maxAfterMealSugar
-    }
-    @FocusState private var focusedField: Field?
-
-    // Hardcoded absolute min/max limits (to prevent completely unreasonable user inputs)
-    private let absoluteMinBP: Int = 40
-    private let absoluteMaxBP: Int = 250
-    private let absoluteMinSugar: Int = 0
-    private let absoluteMaxSugar: Int = 600
-
-
-    // Initialize the local string states with the current settings values
-    init(settings: Binding<SMAAlertSettings>, isSettingsOpen: Binding<Bool>, newContact: Binding<String>, addEmergencyContact: @escaping () -> Void, removeEmergencyContact: @escaping (String) -> Void, updateEmergencyContact: @escaping (String, String) -> Void) {
-        _settings = settings
-        _isSettingsOpen = isSettingsOpen
-        _newContact = newContact
-        self.addEmergencyContact = addEmergencyContact
-        self.removeEmergencyContact = removeEmergencyContact
-        self.updateEmergencyContact = updateEmergencyContact
-
-        // Initialize local string states from the binding's wrapped value
-        _minSystolicInput = State(initialValue: String(settings.wrappedValue.bpThreshold.minSystolic))
-        _maxSystolicInput = State(initialValue: String(settings.wrappedValue.bpThreshold.maxSystolic))
-        _minDiastolicInput = State(initialValue: String(settings.wrappedValue.bpThreshold.minDiastolic))
-        _maxDiastolicInput = State(initialValue: String(settings.wrappedValue.bpThreshold.maxDiastolic))
-        _minFastingSugarInput = State(initialValue: String(settings.wrappedValue.fastingSugarThreshold.min))
-        _maxFastingSugarInput = State(initialValue: String(settings.wrappedValue.fastingSugarThreshold.max))
-        _minAfterMealSugarInput = State(initialValue: String(settings.wrappedValue.afterMealSugarThreshold.min))
-        _maxAfterMealSugarInput = State(initialValue: String(settings.wrappedValue.afterMealSugarThreshold.max))
-    }
-    
-    // Helper function for consistent validation logic
-    private func validateAndClamp(
-        valueString: String,
-        currentMinSetting: Int,
-        currentMaxSetting: Int,
-        absoluteMin: Int,
-        absoluteMax: Int
-    ) -> Int {
-        if let doubleValue = Double(valueString) {
-            let roundedInt = Int(round(doubleValue))
-            // Clamp within absolute bounds
-            return max(absoluteMin, min(absoluteMax, roundedInt))
-        } else {
-            // If input is empty or invalid, return the current valid setting
-            return currentMinSetting // Or currentMaxSetting, depending on which value is being processed
-        }
-    }
-
-
-    var body: some View {
-        NavigationView {
-            Form {
-                Section(header: Text("Emergency Contacts")) {
-                    List {
-                        ForEach(settings.emergencyContacts, id: \.self) { contact in
-                            HStack {
-                                Text(contact)
-                                Spacer()
-                                Button {
-                                    contactToEdit = contact
-                                    editedContactValue = contact // Pre-fill with current value
-                                    showingEditContactAlert = true
-                                } label: {
-                                    Image(systemName: "pencil.circle.fill")
-                                        .font(.title2)
-                                        .foregroundColor(.blue)
-                                }
-                                .buttonStyle(.plain)
-
-                                Button {
-                                    removeEmergencyContact(contact)
-                                } label: {
-                                    Image(systemName: "minus.circle.fill")
-                                        .font(.title2)
-                                        .foregroundColor(.red)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                Button(role: .destructive) {
-                                    removeEmergencyContact(contact)
-                                } label: {
-                                    Label("Delete", systemImage: "trash.fill")
-                                }
-                            }
-                        }
-                    }
-                    
-                    HStack {
-                        TextField("Add new contact email", text: $newContact)
-                            .autocapitalization(.none)
-                            .keyboardType(.emailAddress)
-                        Button("Add") {
-                            addEmergencyContact()
-                        }
-                    }
-                }
-                
-                Section(header: Text("Blood Pressure Thresholds (mmHg)")) {
-                    VStack(alignment: .leading) {
-                        Text("Systolic Min")
-                            .font(.caption)
-                            .foregroundColor(.gray)
-                        TextField("Min Systolic", text: $minSystolicInput)
-                            .keyboardType(.numberPad)
-                            .textFieldStyle(RoundedBorderTextFieldStyle())
-                            .focused($focusedField, equals: .minSystolic)
-                            .onChange(of: focusedField) { oldValue, newValue in
-                                if oldValue == .minSystolic && newValue == nil {
-                                    let validatedValue = validateAndClamp(
-                                        valueString: minSystolicInput,
-                                        currentMinSetting: settings.bpThreshold.minSystolic,
-                                        currentMaxSetting: settings.bpThreshold.maxSystolic, // Not directly used here, but for consistency
-                                        absoluteMin: absoluteMinBP,
-                                        absoluteMax: absoluteMaxBP
-                                    )
-                                    // Ensure min is not greater than max after validation
-                                    settings.bpThreshold.minSystolic = min(validatedValue, settings.bpThreshold.maxSystolic)
-                                    self.minSystolicInput = String(settings.bpThreshold.minSystolic)
-                                }
-                            }
-                    }
-                    
-                    VStack(alignment: .leading) {
-                        Text("Systolic Max")
-                            .font(.caption)
-                            .foregroundColor(.gray)
-                        TextField("Max Systolic", text: $maxSystolicInput)
-                            .keyboardType(.numberPad)
-                            .textFieldStyle(RoundedBorderTextFieldStyle())
-                            .focused($focusedField, equals: .maxSystolic)
-                            .onChange(of: focusedField) { oldValue, newValue in
-                                if oldValue == .maxSystolic && newValue == nil {
-                                    let validatedValue = validateAndClamp(
-                                        valueString: maxSystolicInput,
-                                        currentMinSetting: settings.bpThreshold.minSystolic, // For consistency
-                                        currentMaxSetting: settings.bpThreshold.maxSystolic,
-                                        absoluteMin: absoluteMinBP,
-                                        absoluteMax: absoluteMaxBP
-                                    )
-                                    // Ensure max is not less than min after validation
-                                    settings.bpThreshold.maxSystolic = max(validatedValue, settings.bpThreshold.minSystolic)
-                                    self.maxSystolicInput = String(settings.bpThreshold.maxSystolic)
-                                }
-                            }
-                    }
-
-                    VStack(alignment: .leading) {
-                        Text("Diastolic Min")
-                            .font(.caption)
-                            .foregroundColor(.gray)
-                        TextField("Min Diastolic", text: $minDiastolicInput)
-                            .keyboardType(.numberPad)
-                            .textFieldStyle(RoundedBorderTextFieldStyle())
-                            .focused($focusedField, equals: .minDiastolic)
-                            .onChange(of: focusedField) { oldValue, newValue in
-                                if oldValue == .minDiastolic && newValue == nil {
-                                    let validatedValue = validateAndClamp(
-                                        valueString: minDiastolicInput,
-                                        currentMinSetting: settings.bpThreshold.minDiastolic,
-                                        currentMaxSetting: settings.bpThreshold.maxDiastolic,
-                                        absoluteMin: absoluteMinBP,
-                                        absoluteMax: absoluteMaxBP
-                                    )
-                                    settings.bpThreshold.minDiastolic = min(validatedValue, settings.bpThreshold.maxDiastolic)
-                                    self.minDiastolicInput = String(settings.bpThreshold.minDiastolic)
-                                }
-                            }
-                    }
-                    
-                    VStack(alignment: .leading) {
-                        Text("Diastolic Max")
-                            .font(.caption)
-                            .foregroundColor(.gray)
-                        TextField("Max Diastolic", text: $maxDiastolicInput)
-                            .keyboardType(.numberPad)
-                            .textFieldStyle(RoundedBorderTextFieldStyle())
-                            .focused($focusedField, equals: .maxDiastolic)
-                            .onChange(of: focusedField) { oldValue, newValue in
-                                if oldValue == .maxDiastolic && newValue == nil {
-                                    let validatedValue = validateAndClamp(
-                                        valueString: maxDiastolicInput,
-                                        currentMinSetting: settings.bpThreshold.minDiastolic,
-                                        currentMaxSetting: settings.bpThreshold.maxDiastolic,
-                                        absoluteMin: absoluteMinBP,
-                                        absoluteMax: absoluteMaxBP
-                                    )
-                                    settings.bpThreshold.maxDiastolic = max(validatedValue, settings.bpThreshold.minDiastolic)
-                                    self.maxDiastolicInput = String(settings.bpThreshold.maxDiastolic)
-                                }
-                            }
-                    }
-                }
-                
-                Section(header: Text("Blood Sugar Thresholds (mg/dL)")) {
-                    VStack(alignment: .leading) {
-                        Text("Fasting Sugar Min")
-                            .font(.caption)
-                            .foregroundColor(.gray)
-                        TextField("Min Fasting Sugar", text: $minFastingSugarInput)
-                            .keyboardType(.numberPad)
-                            .textFieldStyle(RoundedBorderTextFieldStyle())
-                            .focused($focusedField, equals: .minFastingSugar)
-                            .onChange(of: focusedField) { oldValue, newValue in
-                                if oldValue == .minFastingSugar && newValue == nil {
-                                    let validatedValue = validateAndClamp(
-                                        valueString: minFastingSugarInput,
-                                        currentMinSetting: settings.fastingSugarThreshold.min,
-                                        currentMaxSetting: settings.fastingSugarThreshold.max,
-                                        absoluteMin: absoluteMinSugar,
-                                        absoluteMax: absoluteMaxSugar
-                                    )
-                                    settings.fastingSugarThreshold.min = min(validatedValue, settings.fastingSugarThreshold.max)
-                                    self.minFastingSugarInput = String(settings.fastingSugarThreshold.min)
-                                }
-                            }
-                    }
-                    
-                    VStack(alignment: .leading) {
-                        Text("Fasting Sugar Max")
-                            .font(.caption)
-                            .foregroundColor(.gray)
-                        TextField("Max Fasting Sugar", text: $maxFastingSugarInput)
-                            .keyboardType(.numberPad)
-                            .textFieldStyle(RoundedBorderTextFieldStyle())
-                            .focused($focusedField, equals: .maxFastingSugar)
-                            .onChange(of: focusedField) { oldValue, newValue in
-                                if oldValue == .maxFastingSugar && newValue == nil {
-                                    let validatedValue = validateAndClamp(
-                                        valueString: maxFastingSugarInput,
-                                        currentMinSetting: settings.fastingSugarThreshold.min,
-                                        currentMaxSetting: settings.fastingSugarThreshold.max,
-                                        absoluteMin: absoluteMinSugar,
-                                        absoluteMax: absoluteMaxSugar
-                                    )
-                                    settings.fastingSugarThreshold.max = max(validatedValue, settings.fastingSugarThreshold.min)
-                                    self.maxFastingSugarInput = String(settings.fastingSugarThreshold.max)
-                                }
-                            }
-                    }
-
-                    VStack(alignment: .leading) {
-                        Text("After Meal Sugar Min")
-                            .font(.caption)
-                            .foregroundColor(.gray)
-                        TextField("Min After Meal Sugar", text: $minAfterMealSugarInput)
-                            .keyboardType(.numberPad)
-                            .textFieldStyle(RoundedBorderTextFieldStyle())
-                            .focused($focusedField, equals: .minAfterMealSugar)
-                            .onChange(of: focusedField) { oldValue, newValue in
-                                if oldValue == .minAfterMealSugar && newValue == nil {
-                                    let validatedValue = validateAndClamp(
-                                        valueString: minAfterMealSugarInput,
-                                        currentMinSetting: settings.afterMealSugarThreshold.min,
-                                        currentMaxSetting: settings.afterMealSugarThreshold.max,
-                                        absoluteMin: absoluteMinSugar,
-                                        absoluteMax: absoluteMaxSugar
-                                    )
-                                    settings.afterMealSugarThreshold.min = min(validatedValue, settings.afterMealSugarThreshold.max)
-                                    self.minAfterMealSugarInput = String(settings.afterMealSugarThreshold.min)
-                                }
-                            }
-                    }
-                    
-                    VStack(alignment: .leading) {
-                        Text("After Meal Sugar Max")
-                            .font(.caption)
-                            .foregroundColor(.gray)
-                        TextField("Max After Meal Sugar", text: $maxAfterMealSugarInput)
-                            .keyboardType(.numberPad)
-                            .textFieldStyle(RoundedBorderTextFieldStyle())
-                            .focused($focusedField, equals: .maxAfterMealSugar)
-                            .onChange(of: focusedField) { oldValue, newValue in
-                                if oldValue == .maxAfterMealSugar && newValue == nil {
-                                    let validatedValue = validateAndClamp(
-                                        valueString: maxAfterMealSugarInput,
-                                        currentMinSetting: settings.afterMealSugarThreshold.min,
-                                        currentMaxSetting: settings.afterMealSugarThreshold.max,
-                                        absoluteMin: absoluteMinSugar,
-                                        absoluteMax: absoluteMaxSugar
-                                    )
-                                    settings.afterMealSugarThreshold.max = max(validatedValue, settings.afterMealSugarThreshold.min)
-                                    self.maxAfterMealSugarInput = String(settings.afterMealSugarThreshold.max)
-                                }
-                            }
-                    }
-                }
-            }
-            .navigationTitle("Alert Settings")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Done") {
-                        // Dismiss keyboard if still active when 'Done' is tapped
-                        focusedField = nil
-                        isSettingsOpen = false
-                    }
-                }
-            }
-            .alert("Edit Contact", isPresented: $showingEditContactAlert) {
-                TextField("Email", text: $editedContactValue)
-                    .autocapitalization(.none)
-                    .keyboardType(.emailAddress)
-                Button("Update") {
-                    if !editedContactValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && editedContactValue.contains("@") {
-                        updateEmergencyContact(contactToEdit, editedContactValue)
-                    } else {
-                        // Optionally, show an error for invalid email
-                        print("Invalid email for update")
-                    }
-                }
-                Button("Cancel", role: .cancel) { }
-            } message: {
-                Text("Enter the new email address for \(contactToEdit).")
-            }
-        }
-    }
-}
-
-
-// Alert Stats Sub-View
-struct SMAEmailAlertStatsView: View {
-    let alerts: [SMAAlert]
-    let settings: SMAAlertSettings
-
-    var body: some View {
-        HStack(spacing: 16) {
-            // Fix 1: Reordered borderColor and gradient arguments
-            SMACustomCards(borderColor: .red.opacity(0.2), gradient: LinearGradient(gradient: Gradient(colors: [Color.red.opacity(0.05), Color.red.opacity(0.1)]), startPoint: .topLeading, endPoint: .bottomTrailing)) {
-                SMACustomCardContents {
-                    HStack {
-                        VStack(alignment: .leading) {
-                            Text("\(alerts.filter { $0.type == .emergency }.count)")
-                                .font(.title)
-                                .fontWeight(.bold)
-                                .foregroundColor(.red.opacity(0.7))
-                            Text("Emergency Alerts")
-                                .font(.caption)
-                                .foregroundColor(.red.opacity(0.6))
-                        }
-                        Spacer()
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.title2)
-                            .padding(8)
-                            .background(Color.red.opacity(0.2))
-                            .clipShape(Circle())
-                            .foregroundColor(.red.opacity(0.7))
-                    }
-                }
-            }
-
-            // Fix 1: Reordered borderColor and gradient arguments
-            SMACustomCards(borderColor: .blue.opacity(0.2), gradient: LinearGradient(gradient: Gradient(colors: [Color.blue.opacity(0.05), Color.blue.opacity(0.1)]), startPoint: .topLeading, endPoint: .bottomTrailing)) {
-                SMACustomCardContents {
-                    HStack {
-                        VStack(alignment: .leading) {
-                            Text("\(settings.emergencyContacts.count)")
-                                .font(.title)
-                                .fontWeight(.bold)
-                                .foregroundColor(.blue.opacity(0.7))
-                            Text("Emergency Contacts")
-                                .font(.caption)
-                                .foregroundColor(.blue.opacity(0.6))
-                        }
-                        Spacer()
-                        Image(systemName: "envelope.fill")
-                            .font(.title2)
-                            .padding(8)
-                            .background(Color.blue.opacity(0.2))
-                            .clipShape(Circle())
-                            .foregroundColor(.blue.opacity(0.7))
-                    }
-                }
-            }
-
-            // Fix 1: Reordered borderColor and gradient arguments
-            SMACustomCards(borderColor: .green.opacity(0.2), gradient: LinearGradient(gradient: Gradient(colors: [Color.green.opacity(0.05), Color.green.opacity(0.1)]), startPoint: .topLeading, endPoint: .bottomTrailing)) {
-                SMACustomCardContents {
-                    HStack {
-                        VStack(alignment: .leading) {
-                            Text("\(alerts.isEmpty ? 0 : Int(round(Double(alerts.filter { $0.status == .sent }.count) / Double(alerts.count) * 100)))%")
-                                .font(.title)
-                                .fontWeight(.bold)
-                                .foregroundColor(.green.opacity(0.7))
-                            Text("Delivery Rate")
-                                .font(.caption)
-                                .foregroundColor(.green.opacity(0.6))
-                        }
-                        Spacer()
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.title2)
-                            .padding(8)
-                            .background(Color.green.opacity(0.2))
-                            .clipShape(Circle())
-                            .foregroundColor(.green.opacity(0.7))
-                    }
-                }
-            }
-        }
-    }
-}
 
 // Recent Alerts Section Sub-View
 struct SMARecentEmailAlertsSection: View {
     let alerts: [SMAAlert]
-    // FIX: Changed parameter name to _status to remove external argument label
     let getStatusIcon: (_ status: SMAAlert.SMAAlertStatus) -> Image
-    // FIX: Changed parameter name to _status to remove external argument label
     let getStatusIconColor: (_ status: SMAAlert.SMAAlertStatus) -> Color
-    let getTypeForBadge: (SMAAlert.SMAAlertType) -> String // Function parameter
+    let getTypeForBadge: (SMAAlert.SMAAlertType) -> String
     let getBadgeColors: (String) -> (bg: Color, text: Color, border: Color)
-
+    
     private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.timeStyle = .short
         return formatter
     }()
-
+    
     private static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateStyle = .short
         return formatter
     }()
-
+    
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Recent Email Alerts")
                 .font(.title2)
                 .fontWeight(.semibold)
-
-            // FIX: Added id: \.id to ForEach to help compiler inference
+                .padding(.horizontal)
+            
             ForEach(alerts, id: \.id) { alert in
                 SMACustomCards {
                     VStack(alignment: .leading) {
@@ -1146,17 +1047,13 @@ struct SMARecentEmailAlertsSection: View {
                                         .clipShape(Circle())
                                         .foregroundColor(.gray.opacity(0.6))
                                     VStack(alignment: .leading) {
-                                        // No change needed here for alert.subject, it's already a String
                                         SMACustomCardTitles(text: alert.subject, fontSize: 18)
-                                        // Fix: Format Date to String before passing to Text
-                                        SMACustomCardDescriptions(text: "To: \(Self.dateFormatter.string(from: alert.sentAt)) at \(Self.timeFormatter.string(from: alert.sentAt))")
+                                        SMACustomCardDescriptions(text: "To: \(alert.recipient) on \(Self.dateFormatter.string(from: alert.sentAt)) at \(Self.timeFormatter.string(from: alert.sentAt))")
                                     }
                                 }
                                 Spacer()
                                 HStack(spacing: 8) {
-                                    // Changed call to getTypeForBadge to remove the 'type:' label
                                     let badgeType = getTypeForBadge(alert.type)
-                                    // Changed call to getBadgeColors to remove the 'type:' label
                                     let colors = getBadgeColors(badgeType)
                                     SMACustomBadges(text: badgeType.uppercased(), variant: "outline")
                                         .background(colors.bg)
@@ -1164,9 +1061,7 @@ struct SMARecentEmailAlertsSection: View {
                                         .overlay(RoundedRectangle(cornerRadius: 5).stroke(colors.border, lineWidth: 1))
                                     
                                     HStack(spacing: 4) {
-                                        // FIX: Changed call to getStatusIcon to remove the 'status:' label
                                         getStatusIcon(alert.status)
-                                            // FIX: Changed call to getStatusIconColor to remove the 'status:' label
                                             .foregroundColor(getStatusIconColor(alert.status))
                                         Text(alert.status.rawValue.capitalized)
                                             .font(.caption2)
@@ -1190,6 +1085,7 @@ struct SMARecentEmailAlertsSection: View {
         .padding(.horizontal)
     }
 }
+
 
 // No Alerts Placeholder Sub-View
 struct SMANoEmailAlertsPlaceholderView: View {

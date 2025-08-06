@@ -1,0 +1,10 @@
+//
+//  Config.xcconfig
+//  Smart HealthMate
+//
+//  Created by Moin on 8/6/25.
+//
+
+// Configuration settings file format documentation can be found at:
+// https://developer.apple.com/documentation/xcode/adding-a-build-configuration-file-to-your-project
+API_KEY=AIzaSyCnqpCGzeHhplPhx6PDcmQYAEUQG3mp9R8
